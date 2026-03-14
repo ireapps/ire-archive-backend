@@ -2,6 +2,12 @@ name: Reindex Production Database
 
 # NOTE: This workflow re-indexes IRE's production Qdrant database.
 # Fork maintainers: update for your own Fly.io app.
+#
+# Triggers:
+#   - workflow_dispatch: manual trigger from the GitHub Actions UI
+#   - repository_dispatch: programmatic trigger from another repo via
+#     peter-evans/repository-dispatch with event-type "reindex-from-data-repo"
+#     and an optional client-payload containing "clear_db" and "export_url".
 
 on:
   workflow_dispatch:
@@ -11,6 +17,8 @@ on:
         required: true
         default: true
         type: boolean
+  repository_dispatch:
+    types: [reindex-from-data-repo]
 
 concurrency:
   group: prod-backend-ops
@@ -31,6 +39,25 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Resolve parameters
+        id: params
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            CLEAR_DB="${{ github.event.client_payload.clear_db }}"
+            EXPORT_URL="${{ github.event.client_payload.export_url }}"
+          else
+            CLEAR_DB="${{ inputs.clear_db }}"
+            EXPORT_URL=""
+          fi
+
+          # Default clear_db to true when unset
+          if [ -z "$CLEAR_DB" ]; then
+            CLEAR_DB="true"
+          fi
+
+          echo "clear_db=$CLEAR_DB" >> "$GITHUB_OUTPUT"
+          echo "export_url=$EXPORT_URL" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -53,10 +80,12 @@ jobs:
       - name: Reindex production database
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DATA_URL: ${{ steps.params.outputs.export_url }}
+          DATA_URL_TOKEN: ${{ secrets.DATA_URL_TOKEN }}
         run: |
           set -euo pipefail
           FLAG="--clear-db"
-          if [ "${{ inputs.clear_db }}" != "true" ]; then
+          if [ "${{ steps.params.outputs.clear_db }}" != "true" ]; then
             FLAG="--no-clear-db"
           fi
           uv run python -m scripts.prod_tasks index --yes "$FLAG"

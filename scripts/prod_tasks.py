@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -248,26 +249,34 @@ def cmd_index(args: argparse.Namespace) -> None:
         info("Executing indexer script (this will take 10-15 minutes)...")
         console.print("[dim]Real-time logs will appear below:[/dim]\n")
 
+        # Build environment variables to forward to the remote machine
+        env_parts: list[str] = []
         if args.clear_db:
-            ssh_cmd = [
-                FLY_BIN,
-                "ssh",
-                "console",
-                "--app",
-                APP_NAME,
-                "--command",
-                "sh -c 'CLEAR_DB_BEFORE_INDEX=true python /app/scripts/index.py'",
-            ]
+            env_parts.append("CLEAR_DB_BEFORE_INDEX=true")
+
+        data_url = os.environ.get("DATA_URL")
+        if data_url:
+            env_parts.append(f"DATA_URL={data_url}")
+
+        data_url_token = os.environ.get("DATA_URL_TOKEN")
+        if data_url_token:
+            env_parts.append(f"DATA_URL_TOKEN={data_url_token}")
+
+        if env_parts:
+            env_str = " ".join(env_parts)
+            remote_cmd = f"sh -c '{env_str} python /app/scripts/index.py'"
         else:
-            ssh_cmd = [
-                FLY_BIN,
-                "ssh",
-                "console",
-                "--app",
-                APP_NAME,
-                "--command",
-                "python /app/scripts/index.py",
-            ]
+            remote_cmd = "python /app/scripts/index.py"
+
+        ssh_cmd = [
+            FLY_BIN,
+            "ssh",
+            "console",
+            "--app",
+            APP_NAME,
+            "--command",
+            remote_cmd,
+        ]
 
         try:
             run_command(ssh_cmd)
