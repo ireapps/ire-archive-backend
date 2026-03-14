@@ -42,22 +42,37 @@ jobs:
 
       - name: Resolve parameters
         id: params
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_CLEAR_DB: ${{ github.event.client_payload.clear_db }}
+          DISPATCH_EXPORT_URL: ${{ github.event.client_payload.export_url }}
+          INPUT_CLEAR_DB: ${{ inputs.clear_db }}
         run: |
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            CLEAR_DB="${{ github.event.client_payload.clear_db }}"
-            EXPORT_URL="${{ github.event.client_payload.export_url }}"
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "repository_dispatch" ]; then
+            CLEAR_DB="$DISPATCH_CLEAR_DB"
+            EXPORT_URL="$DISPATCH_EXPORT_URL"
           else
-            CLEAR_DB="${{ inputs.clear_db }}"
+            CLEAR_DB="$INPUT_CLEAR_DB"
             EXPORT_URL=""
           fi
 
-          # Default clear_db to true when unset
-          if [ -z "$CLEAR_DB" ]; then
-            CLEAR_DB="true"
-          fi
+          # Normalise clear_db to "true" or "false"
+          case "$CLEAR_DB" in
+            true|True|TRUE|1) CLEAR_DB="true" ;;
+            false|False|FALSE|0) CLEAR_DB="false" ;;
+            *) CLEAR_DB="true" ;;  # default when missing or unrecognised
+          esac
 
           echo "clear_db=$CLEAR_DB" >> "$GITHUB_OUTPUT"
-          echo "export_url=$EXPORT_URL" >> "$GITHUB_OUTPUT"
+
+          # Use heredoc for export_url to prevent newline injection
+          {
+            echo "export_url<<__EOF__"
+            echo "$EXPORT_URL"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -77,11 +92,14 @@ jobs:
       - name: Set up Fly.io CLI
         uses: superfly/flyctl-actions/setup-flyctl@master
 
+      # NOTE: DATA_URL_TOKEN is not passed here — it must be configured as a
+      # Fly.io secret on the production machine so it is never exposed in
+      # command lines or CI logs:
+      #   fly secrets set DATA_URL_TOKEN=<token> --app ire-semantic-search
       - name: Reindex production database
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           DATA_URL: ${{ steps.params.outputs.export_url }}
-          DATA_URL_TOKEN: ${{ secrets.DATA_URL_TOKEN }}
         run: |
           set -euo pipefail
           FLAG="--clear-db"

@@ -250,7 +250,9 @@ def cmd_index(args: argparse.Namespace) -> None:
         info("Executing indexer script (this will take 10-15 minutes)...")
         console.print("[dim]Real-time logs will appear below:[/dim]\n")
 
-        # Build environment variables to forward to the remote machine
+        # Build environment variables to forward to the remote machine.
+        # Note: DATA_URL_TOKEN is NOT forwarded here — it must be stored as
+        # a Fly secret so it never appears in command lines or logs.
         env_parts: list[str] = []
         if args.clear_db:
             env_parts.append("CLEAR_DB_BEFORE_INDEX=true")
@@ -259,13 +261,8 @@ def cmd_index(args: argparse.Namespace) -> None:
         if data_url:
             env_parts.append(f"DATA_URL={shlex.quote(data_url)}")
 
-        data_url_token = os.environ.get("DATA_URL_TOKEN")
-        if data_url_token:
-            env_parts.append(f"DATA_URL_TOKEN={shlex.quote(data_url_token)}")
-
         if env_parts:
-            env_str = " ".join(env_parts)
-            remote_cmd = f"sh -c '{env_str} python /app/scripts/index.py'"
+            remote_cmd = "env " + " ".join(env_parts) + " python /app/scripts/index.py"
         else:
             remote_cmd = "python /app/scripts/index.py"
 
