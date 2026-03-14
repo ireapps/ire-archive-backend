@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 import time
 from collections.abc import Callable
@@ -256,11 +257,11 @@ def cmd_index(args: argparse.Namespace) -> None:
 
         data_url = os.environ.get("DATA_URL")
         if data_url:
-            env_parts.append(f"DATA_URL={data_url}")
+            env_parts.append(f"DATA_URL={shlex.quote(data_url)}")
 
         data_url_token = os.environ.get("DATA_URL_TOKEN")
         if data_url_token:
-            env_parts.append(f"DATA_URL_TOKEN={data_url_token}")
+            env_parts.append(f"DATA_URL_TOKEN={shlex.quote(data_url_token)}")
 
         if env_parts:
             env_str = " ".join(env_parts)
