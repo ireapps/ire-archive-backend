@@ -64,9 +64,13 @@ async def require_member(
 ) -> Session:
     """Require session with active membership.
 
+    IRE staff (ire.org email addresses) are granted access regardless of
+    membership status.
+
     Use for member-only endpoints.
     """
-    if not session.is_active_member:
+    is_ire_staff = session.email.lower().endswith("@ire.org")
+    if not is_ire_staff and not session.is_active_member:
         from app.auth.exceptions import MembershipRequiredError
 
         raise MembershipRequiredError()
