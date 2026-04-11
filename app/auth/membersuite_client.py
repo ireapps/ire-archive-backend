@@ -319,7 +319,9 @@ class MemberSuiteClient:
         user = await self.get_user_info(auth_token)
 
         # Step 3: Verify membership if required
-        if require_membership and not user.is_active_member:
+        # IRE staff (email addresses ending with @ire.org) bypass the membership check.
+        is_ire_staff = user.email.lower().endswith("@ire.org")
+        if require_membership and not is_ire_staff and not user.is_active_member:
             logger.warning(
                 "membersuite_membership_denied",
                 user_id=user.user_id,
