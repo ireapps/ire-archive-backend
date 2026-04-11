@@ -48,9 +48,7 @@ class TestAuthenticateAndVerifyMembershipBypass:
         client.exchange_token_guid = AsyncMock(return_value="token-abc")
         client.get_user_info = AsyncMock(return_value=user)
 
-        auth_token, returned_user = await client.authenticate_and_verify(
-            "guid-123", require_membership=True
-        )
+        auth_token, returned_user = await client.authenticate_and_verify("guid-123", require_membership=True)
         assert auth_token == "token-abc"
         assert returned_user is user
 
@@ -71,9 +69,7 @@ class TestAuthenticateAndVerifyMembershipBypass:
         client.exchange_token_guid = AsyncMock(return_value="token-abc")
         client.get_user_info = AsyncMock(return_value=user)
 
-        auth_token, returned_user = await client.authenticate_and_verify(
-            "guid-123", require_membership=False
-        )
+        auth_token, returned_user = await client.authenticate_and_verify("guid-123", require_membership=False)
         assert auth_token == "token-abc"
 
     @pytest.mark.asyncio
@@ -83,9 +79,7 @@ class TestAuthenticateAndVerifyMembershipBypass:
         client.exchange_token_guid = AsyncMock(return_value="token-abc")
         client.get_user_info = AsyncMock(return_value=user)
 
-        auth_token, returned_user = await client.authenticate_and_verify(
-            "guid-123", require_membership=True
-        )
+        auth_token, returned_user = await client.authenticate_and_verify("guid-123", require_membership=True)
         assert auth_token == "token-abc"
         assert returned_user is user
 
@@ -96,9 +90,7 @@ class TestAuthenticateAndVerifyMembershipBypass:
         client.exchange_token_guid = AsyncMock(return_value="token-abc")
         client.get_user_info = AsyncMock(return_value=user)
 
-        auth_token, returned_user = await client.authenticate_and_verify(
-            "guid-123", require_membership=True
-        )
+        auth_token, returned_user = await client.authenticate_and_verify("guid-123", require_membership=True)
         assert auth_token == "token-abc"
 
     @pytest.mark.asyncio
