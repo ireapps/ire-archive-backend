@@ -64,8 +64,8 @@ async def require_member(
 ) -> Session:
     """Require session with active membership.
 
-    IRE staff (ire.org email addresses) are granted access regardless of
-    membership status.
+    IRE staff (email addresses ending with @ire.org) are granted access
+    regardless of membership status.
 
     Use for member-only endpoints.
     """
