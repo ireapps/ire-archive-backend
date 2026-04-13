@@ -12,7 +12,7 @@ zoomable, pannable scatter plot — color-coded by category with hover tooltips 
 - [Docker](https://docs.docker.com/get-docker/) (for Qdrant)
 - [Python 3.12+](https://www.python.org/)
 - [Node.js 20+](https://nodejs.org/)
-- A populated Qdrant collection (see [ire-archive-backend](https://github.com/ireapps/ire-archive-backend) for indexing)
+- A Qdrant instance with a populated vector collection (the [ire-archive-backend](https://github.com/ireapps/ire-archive-backend) indexer is one way to create this, or use any collection with dense vectors and a compatible payload schema)
 
 ## Quick Start
 
