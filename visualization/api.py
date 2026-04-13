@@ -3,9 +3,9 @@
 Run separately from the main archive API so that ``umap-learn`` and its
 heavy transitive dependencies never ship to the Fly.io production image.
 
-Usage (from the repo root):
+Usage — see the README in this directory for full setup instructions::
+
     cd visualization
-    pip install umap-learn fastapi uvicorn qdrant-client numpy structlog python-dotenv
     uvicorn api:app --port 8001
 
 The SvelteKit frontend defaults to ``http://localhost:8001`` (see

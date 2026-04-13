@@ -198,7 +198,7 @@ def generate_embedding_map(
     )
 
     points = []
-    for i, (coord, payload) in enumerate(zip(coords, payloads)):
+    for coord, payload in zip(coords, payloads):
         points.append(
             {
                 "x": round(coord[0], 5),
