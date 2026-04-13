@@ -71,7 +71,6 @@ from app.services.search_service import (
     perform_keyword_search,
     perform_semantic_search,
 )
-from app.services.visualization_service import generate_embedding_map
 
 logger.info("imports_successful")
 
@@ -782,68 +781,6 @@ async def get_similar_resources_endpoint(
     similar_cache[cache_key] = similar_response
 
     return similar_response
-
-
-# --- Visualization endpoint ---
-
-# In-memory cache for the expensive UMAP projection
-# Maps cache_key → (result, timestamp)
-_embedding_map_cache: dict[str, tuple[Any, float]] = {}
-_EMBEDDING_MAP_CACHE_TTL: int = 3600  # 1 hour
-
-
-@app.get("/visualize/embeddings")
-@limit_with_bypass(RATE_LIMIT_STATS)
-async def get_embedding_map(
-    request: Request,
-    response: Response,
-    sample: int | None = None,
-    n_neighbors: int = 15,
-    min_dist: float = 0.1,
-):
-    """Return 2D UMAP projection of all document embeddings for visualization.
-
-    This is a computationally expensive endpoint — results are cached for 1 hour.
-
-    Query parameters:
-        sample: Optional maximum number of points to include (for faster dev iteration).
-        n_neighbors: UMAP locality parameter (default 15). Higher = more global structure.
-        min_dist: UMAP minimum distance (default 0.1). Lower = tighter clusters.
-
-    Returns:
-        JSON with ``points`` (list of {x, y, vector_id, title, category, year, ...})
-        and ``meta`` (total count, timing, UMAP params, category breakdown).
-    """
-    logger.info(
-        "embedding_map_request",
-        sample=sample,
-        n_neighbors=n_neighbors,
-        min_dist=min_dist,
-    )
-
-    # Build a cache key from the parameters
-    cache_key = f"{sample}:{n_neighbors}:{min_dist}"
-
-    # Return cached result if still valid (per-key timestamp)
-    if cache_key in _embedding_map_cache:
-        cached_result, cached_at = _embedding_map_cache[cache_key]
-        if (time.time() - cached_at) < _EMBEDDING_MAP_CACHE_TTL:
-            logger.info("embedding_map_cache_hit")
-            return cached_result
-
-    qdrant_client = get_qdrant_client()
-
-    result = generate_embedding_map(
-        qdrant_client,
-        sample_limit=sample,
-        n_neighbors=n_neighbors,
-        min_dist=min_dist,
-    )
-
-    # Cache the result with its own timestamp
-    _embedding_map_cache[cache_key] = (result, time.time())
-
-    return result
 
 
 logger.info("fastapi_main_loaded")

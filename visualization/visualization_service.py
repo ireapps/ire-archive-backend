@@ -2,8 +2,13 @@
 
 Retrieves dense vectors from Qdrant, reduces them to 2D coordinates,
 and returns the result with document metadata for interactive visualization.
+
+This module is intentionally decoupled from the main ``app`` package so that
+``umap-learn`` and its transitive dependencies (numba, llvmlite, …) are never
+required by the production Fly.io deployment.
 """
 
+import os
 import time
 from typing import Any
 
@@ -12,9 +17,11 @@ import structlog
 import umap
 from qdrant_client import QdrantClient
 
-from app.config import COLLECTION_NAME, SCROLL_BATCH_SIZE
-
 logger = structlog.get_logger()
+
+# Config — standalone defaults matching the main app, overridable via env vars
+COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "nonprofit_knowledge")
+SCROLL_BATCH_SIZE: int = int(os.getenv("SCROLL_BATCH_SIZE", "100"))
 
 # UMAP defaults tuned for archive-sized collections (hundreds to low thousands)
 DEFAULT_N_NEIGHBORS = 15

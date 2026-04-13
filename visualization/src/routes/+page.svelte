@@ -6,7 +6,7 @@
 	import PointDetail from '$lib/components/PointDetail.svelte';
 	import type { EmbeddingPoint, EmbeddingResponse, TooltipState } from '$lib/types';
 
-	const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
+	const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8001';
 
 	let points: EmbeddingPoint[] = $state([]);
 	let meta: EmbeddingResponse['meta'] | null = $state(null);
