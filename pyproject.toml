@@ -29,6 +29,7 @@ dependencies = [
     "slowapi>=0.1.9",
     "redis>=5.0.0",
     "itsdangerous>=2.1.0",
+    "umap-learn>=0.5.12",
 ]
 authors = [
     { name = "Investigative Reporters & Editors", email = "help@ire.org" },
@@ -71,3 +72,8 @@ exclude = "(^site/|^logs/|^models_cache/|^data/)"
 cache_dir = ".mypy_cache"
 warn_unused_configs = true
 ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.10",
+]
