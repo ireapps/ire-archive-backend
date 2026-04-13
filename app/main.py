@@ -787,8 +787,8 @@ async def get_similar_resources_endpoint(
 # --- Visualization endpoint ---
 
 # In-memory cache for the expensive UMAP projection
-_embedding_map_cache: dict[str, Any] = {}
-_embedding_map_cache_time: float = 0.0
+# Maps cache_key → (result, timestamp)
+_embedding_map_cache: dict[str, tuple[Any, float]] = {}
 _EMBEDDING_MAP_CACHE_TTL: int = 3600  # 1 hour
 
 
@@ -814,8 +814,6 @@ async def get_embedding_map(
         JSON with ``points`` (list of {x, y, vector_id, title, category, year, ...})
         and ``meta`` (total count, timing, UMAP params, category breakdown).
     """
-    global _embedding_map_cache, _embedding_map_cache_time
-
     logger.info(
         "embedding_map_request",
         sample=sample,
@@ -826,10 +824,12 @@ async def get_embedding_map(
     # Build a cache key from the parameters
     cache_key = f"{sample}:{n_neighbors}:{min_dist}"
 
-    # Return cached result if still valid
-    if cache_key in _embedding_map_cache and (time.time() - _embedding_map_cache_time) < _EMBEDDING_MAP_CACHE_TTL:
-        logger.info("embedding_map_cache_hit")
-        return _embedding_map_cache[cache_key]
+    # Return cached result if still valid (per-key timestamp)
+    if cache_key in _embedding_map_cache:
+        cached_result, cached_at = _embedding_map_cache[cache_key]
+        if (time.time() - cached_at) < _EMBEDDING_MAP_CACHE_TTL:
+            logger.info("embedding_map_cache_hit")
+            return cached_result
 
     qdrant_client = get_qdrant_client()
 
@@ -840,9 +840,8 @@ async def get_embedding_map(
         min_dist=min_dist,
     )
 
-    # Cache the result
-    _embedding_map_cache[cache_key] = result
-    _embedding_map_cache_time = time.time()
+    # Cache the result with its own timestamp
+    _embedding_map_cache[cache_key] = (result, time.time())
 
     return result
 
