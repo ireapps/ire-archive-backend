@@ -1,79 +1,117 @@
 # IRE Archive Embedding Explorer
 
-Interactive 2D visualization of IRE archive document embeddings using SvelteKit 5 and D3.
+Interactive 2D visualization of [IRE](https://www.ire.org/) archive document embeddings using SvelteKit 5 and D3.
 
 Documents are projected from 384-dimensional embedding space to 2D via UMAP, then rendered as a
 zoomable, pannable scatter plot — color-coded by category with hover tooltips and click-to-inspect.
 
-> **Decoupled from production** — the visualization has its own lightweight API server
-> (`api.py`) so that `umap-learn` and its heavy dependencies never ship to Fly.io.
+![Stack: SvelteKit 5 · D3 · FastAPI · UMAP · Qdrant](https://img.shields.io/badge/stack-SvelteKit_5_%C2%B7_D3_%C2%B7_FastAPI_%C2%B7_UMAP_%C2%B7_Qdrant-blue)
+
+## Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) (for Qdrant)
+- [Python 3.12+](https://www.python.org/)
+- [Node.js 20+](https://nodejs.org/)
+- A populated Qdrant collection (see [ire-archive-backend](https://github.com/ireapps/ire-archive-backend) for indexing)
 
 ## Quick Start
 
 ```bash
-# From the repo root, start Qdrant and index data
-make dev-start
-make dev-index
+# 1. Start Qdrant
+make start
 
-# Install the visualization's Python dependencies (one-time)
-pip install umap-learn fastapi uvicorn qdrant-client numpy structlog python-dotenv
+# 2. Install Python + Node dependencies (one-time)
+make install
 
-# Start the standalone visualization API (port 8001)
-cd visualization
-uvicorn api:app --port 8001
+# 3. Start the API server (terminal 1)
+make api
 
-# In a second terminal, start the SvelteKit frontend (port 5173)
-cd visualization
-npm install
-npm run dev
+# 4. Start the frontend dev server (terminal 2)
+make frontend
 ```
 
-The visualization opens at http://localhost:5173 and fetches data from the
-standalone API at http://localhost:8001.
+The visualization opens at http://localhost:5173 and fetches data from the API at http://localhost:8001.
 
 ## Configuration
 
-| Variable            | Default                 | Description                     |
-| ------------------- | ----------------------- | ------------------------------- |
-| `VITE_API_BASE_URL` | `http://localhost:8001` | Visualization API base URL      |
-| `QDRANT_HOST`       | `localhost`             | Qdrant host (for `api.py`)      |
-| `QDRANT_PORT`       | `6333`                  | Qdrant port (for `api.py`)      |
-| `COLLECTION_NAME`   | `nonprofit_knowledge`   | Qdrant collection (for `api.py`)|
+Copy `.env.example` to `.env` and adjust as needed:
+
+```bash
+cp .env.example .env
+```
+
+| Variable            | Default                 | Description                         |
+| ------------------- | ----------------------- | ----------------------------------- |
+| `VITE_API_BASE_URL` | `http://localhost:8001`  | API URL used by the SvelteKit app   |
+| `QDRANT_HOST`       | `localhost`              | Qdrant host                         |
+| `QDRANT_PORT`       | `6333`                  | Qdrant port                         |
+| `COLLECTION_NAME`   | `nonprofit_knowledge`   | Qdrant collection name              |
+| `SCROLL_BATCH_SIZE` | `100`                   | Batch size for scrolling vectors    |
 
 ## Architecture
 
 ```
-visualization/
-├── api.py                    # Standalone FastAPI server (UMAP + Qdrant)
+├── api.py                    # FastAPI server (UMAP + Qdrant)
 ├── visualization_service.py  # UMAP projection pipeline
+├── docker-compose.yml        # Qdrant container
+├── requirements.txt          # Python dependencies
+├── Makefile                  # Dev workflow commands
+├── package.json              # Node dependencies
 ├── src/                      # SvelteKit 5 frontend
-│   ├── lib/components/       # D3 canvas map, legend, tooltip, detail panel
-│   └── routes/+page.svelte   # Main page
-└── package.json
+│   ├── lib/
+│   │   ├── components/
+│   │   │   ├── EmbeddingMap.svelte   # Canvas scatter plot + D3 zoom
+│   │   │   ├── Legend.svelte         # Category toggle filter
+│   │   │   ├── Tooltip.svelte        # Hover tooltip
+│   │   │   └── PointDetail.svelte    # Click-to-inspect detail panel
+│   │   └── types.ts                  # Shared TypeScript types
+│   └── routes/+page.svelte           # Main page
+└── static/                   # Static assets
 ```
 
-The `api.py` server connects directly to Qdrant, runs UMAP, and serves the
-2D projection. It is **not** part of the main `app/` package and does **not**
-deploy to Fly.io.
+## API
 
-## API Endpoint
+`GET /visualize/embeddings` — returns a 2D UMAP projection of all document embeddings.
 
-`GET /visualize/embeddings` on the standalone server (default port 8001):
+| Parameter      | Default | Description                                  |
+| -------------- | ------- | -------------------------------------------- |
+| `sample`       | —       | Limit to N documents (faster dev iteration)  |
+| `n_neighbors`  | `15`    | UMAP locality — larger = more global         |
+| `min_dist`     | `0.1`   | UMAP minimum distance between points         |
 
-1. Scrolls all dense vectors from Qdrant
-2. Runs UMAP dimensionality reduction (384-dim → 2D)
-3. Returns normalized coordinates + document metadata
-4. Caches the result for 1 hour
+Response:
 
-Query parameters:
+```json
+{
+  "points": [
+    { "x": 0.123, "y": -0.456, "vector_id": "...", "title": "...", "category": "tipsheet", ... }
+  ],
+  "meta": {
+    "total": 1234,
+    "elapsed_seconds": 5.2,
+    "umap_params": { "n_neighbors": 15, "min_dist": 0.1 },
+    "categories": { "tipsheet": 800, "contest entry": 200, ... }
+  }
+}
+```
 
-- `sample` — limit to N documents (faster dev iteration)
-- `n_neighbors` — UMAP locality (default 15)
-- `min_dist` — UMAP min distance (default 0.1)
+## Make Targets
+
+| Target     | Description                             |
+| ---------- | --------------------------------------- |
+| `start`    | Start Qdrant via Docker Compose         |
+| `stop`     | Stop Qdrant                             |
+| `install`  | Install Python + Node dependencies      |
+| `api`      | Start the FastAPI server (port 8001)    |
+| `frontend` | Start the SvelteKit dev server (:5173)  |
+| `check`    | Type-check the SvelteKit frontend       |
+| `build`    | Build the SvelteKit frontend            |
 
 ## Stack
 
-- **SvelteKit 5** — Svelte 5 runes + TypeScript
-- **D3** — zoom/pan behavior + quadtree hit detection
+- **[SvelteKit 5](https://svelte.dev/)** — Svelte 5 runes + TypeScript
+- **[D3](https://d3js.org/)** — zoom/pan behavior + quadtree hit detection
 - **Canvas** — hardware-accelerated rendering for thousands of points
-- **FastAPI** — standalone lightweight API (not part of the main app)
+- **[FastAPI](https://fastapi.tiangolo.com/)** — lightweight API server
+- **[UMAP](https://umap-learn.readthedocs.io/)** — dimensionality reduction (384-dim → 2D)
+- **[Qdrant](https://qdrant.tech/)** — vector database
