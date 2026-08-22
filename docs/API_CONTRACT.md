@@ -7,6 +7,11 @@ and authentication behavior documented here.
 > **Live reference:** The FastAPI backend at `https://api.archive.ire.org` serves interactive
 > OpenAPI documentation at `/docs` and a machine-readable schema at `/openapi.json`.
 
+This is a compatibility boundary between the backend and
+[`ireapps/ire-archive-frontend`](https://github.com/ireapps/ire-archive-frontend). Data publication must not
+change endpoint shapes, authentication, stable resource links, pagination, metadata types, search modes, CORS,
+or cookie behavior without a coordinated frontend change. See [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ---
 
 ## Base URL
@@ -34,8 +39,9 @@ browser automatically includes this cookie.
 |---|---|
 | Name | `ire_session` (configurable via `SESSION_COOKIE_NAME` env var) |
 | HttpOnly | Yes |
-| SameSite | `Lax` |
+| SameSite | `Lax` in local development; `None` in production |
 | Secure | Yes in production, No in development |
+| Domain | Host-only in local development; `.archive.ire.org` in production |
 | Lifetime | Configured via `SESSION_TTL_SECONDS` (default 3600 seconds / 1 hour) |
 
 ### Auth error codes
@@ -53,11 +59,11 @@ The backend must include the frontend's origin in its CORS `allow_origins` list.
 Credentials (`cookies`) require that CORS is configured with explicit origins — wildcards
 (`*`) will not work.
 
-Required CORS settings:
+Required CORS behavior:
 - `allow_origins`: list containing the frontend's deployed origin(s)
 - `allow_credentials`: `true`
 - `allow_methods`: `["GET", "POST", "OPTIONS"]`
-- `allow_headers`: `["Content-Type", "Authorization"]`
+- request headers required by the frontend must be allowed
 
 The reference backend supports runtime-configurable origins via the
 `ADDITIONAL_ALLOWED_ORIGINS` environment variable (see `app/config.py`).
@@ -267,7 +273,7 @@ interface SearchResponse {
 }
 
 interface SearchResult {
-  vector_id: string;         // MD5 hash; use for /resource/{vector_id} lookups
+  vector_id: string;         // Opaque stable ID; use for /resource/{vector_id} lookups
   title: string;
   text: string;              // Excerpt/summary text
   score: number;             // Relevance score (higher = more relevant)
@@ -285,14 +291,14 @@ interface SearchResult {
 
 #### `GET /resource/{vector_id}`
 
-Fetches the full detail for a single resource. The `vector_id` is the MD5 hash returned
-in search results.
+Fetches the full detail for a single resource. Treat the `vector_id` returned in search
+results as an opaque stable identifier.
 
 **Path parameters:**
 
 | Parameter | Type | Description |
 |---|---|---|
-| `vector_id` | `string` | MD5 hash identifier for the resource |
+| `vector_id` | `string` | Opaque stable identifier for the resource |
 
 **Response `200 OK`:**
 ```typescript
@@ -321,7 +327,7 @@ Returns a list of semantically similar resources for the "You might also like" p
 
 | Parameter | Type | Description |
 |---|---|---|
-| `vector_id` | `string` | MD5 hash identifier of the source resource |
+| `vector_id` | `string` | Opaque stable identifier of the source resource |
 
 **Response `200 OK`:**
 ```typescript
@@ -349,6 +355,13 @@ interface SimilarResource {
 ---
 
 ## Shared Types
+
+### Identifier stability
+
+`vector_id` is part of public resource URLs. Clients must not derive or parse it. The current index uses generated
+hashes; the planned publication system will derive IDs from permanent exported record IDs while preserving
+existing IDs for confidently matched records. See
+[backend issue #11](https://github.com/ireapps/ire-archive-backend/issues/11).
 
 ### `ResourceMetadata`
 

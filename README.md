@@ -21,6 +21,24 @@ A FastAPI backend for searching IRE's archive of journalism resources — tipshe
 
 ---
 
+## Architecture
+
+The archive spans three repositories:
+
+- [`ireapps/ire-archive-data`](https://github.com/ireapps/ire-archive-data) is the Django/Postgres editorial source
+  of truth.
+- This repository serves the search and MemberSuite authentication API.
+- [`ireapps/ire-archive-frontend`](https://github.com/ireapps/ire-archive-frontend) consumes that API.
+
+Qdrant is a disposable serving index, not a source of truth or backup. The agreed publication design uses
+validated, immutable, versioned snapshots of approved Django records and replaces the serving collection
+atomically. It is tracked in [issue #11](https://github.com/ireapps/ire-archive-backend/issues/11) and documented
+in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+Code deployment and data publication are separate operations.
+
+---
+
 ## Prerequisites
 
 - Python 3.12
@@ -46,7 +64,8 @@ The API starts at http://localhost:8000. Qdrant dashboard at http://localhost:63
 
 ## Data Files
 
-The source JSON data (`data/ire-archive-data.json`) contains the IRE resource catalog and is **not included** in this repository. You need it before you can index.
+The local source JSON data (`data/ire-archive-data.json`) contains an IRE resource catalog and is **not included**
+in this repository. It is development input, not the permanent editorial record.
 
 ### Local Development
 
@@ -56,9 +75,14 @@ Place the file manually:
 data/ire-archive-data.json
 ```
 
-Contact the IRE team to obtain it, or set `DATA_URL` (see below) and the indexer will download it automatically.
+Contact the IRE team to obtain a validated development snapshot. The legacy indexer can also download a trusted
+snapshot through `DATA_URL` as described below.
 
-### Production / Automated Indexing
+### Legacy production indexing
+
+The current production indexer can read `DATA_URL`, but it predates the publication architecture and must only be
+given a trusted, validated snapshot by an operator. It does not yet authenticate a publication descriptor or
+perform an atomic collection switch. Do not configure it to fetch arbitrary URLs.
 
 ```bash
 # Required: URL to the data file
@@ -120,17 +144,22 @@ The API contract the frontend expects is documented in [docs/API_CONTRACT.md](do
 
 ### Fly.io (Automated)
 
-Pushes to main automatically deploy via GitHub Actions after tests pass. Database indexing remains a manual step.
+Pushes to main automatically deploy code via GitHub Actions after tests pass. This does not publish data.
 
 ### Fly.io (Manual)
 
 ```bash
 make prod-push            # Deploy code
-make prod-index           # Index database (scales VM to 16 GB)
+make prod-index           # Run the legacy Qdrant indexer
 make prod-status          # Check status
 make prod-logs            # View logs
-make prod-rebuild         # Full rebuild: push + clear + index + verify
+make prod-rebuild         # Legacy code deploy + destructive reindex
 ```
+
+These are legacy operator commands, not the target publication workflow. `--no-clear-db` only skips collection
+recreation; it is not incremental synchronization and does not remove omitted or withdrawn records. Production
+publication must eventually follow the atomic process in
+[backend issue #11](https://github.com/ireapps/ire-archive-backend/issues/11).
 
 ### Environment Variables
 
@@ -143,7 +172,7 @@ See [.env.example](.env.example) for all configuration options. Key variables:
 | SESSION_SECRET                   | Random 32+ char hex string    |
 | MS_TENANT_ID / MS_ASSOCIATION_ID | MemberSuite SSO credentials   |
 | FRONTEND_URL                     | Frontend origin for redirects |
-| DATA_URL / DATA_URL_TOKEN        | Data file URL + auth token    |
+| DATA_URL / DATA_URL_TOKEN        | Legacy trusted snapshot input |
 | ADDITIONAL_ALLOWED_ORIGINS       | Extra CORS origins            |
 
 ### Updating ML Dependencies

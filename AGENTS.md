@@ -20,6 +20,37 @@ This is the backend API for the IRE (Investigative Reporters & Editors) archive 
 - Frontend: https://archive.ire.org
 - Backend API: https://api.archive.ire.org
 
+## Cross-Repository Architecture
+
+- `ireapps/ire-archive-data` is the permanent editorial system of record in Django/Postgres.
+- This repository serves the production search and MemberSuite authentication API consumed by
+  `ireapps/ire-archive-frontend`.
+- Qdrant is a disposable serving index. It is not an editorial database, a backup, or a source of truth.
+- Data reaches this service only as a validated, immutable, versioned snapshot of approved records through
+  deliberate batch publication. Draft, withdrawn, omitted, or `needs_review` records must not be published.
+- Code deployment and data publication are separate operations.
+
+The target publication implementation is tracked in
+[backend issue #11](https://github.com/ireapps/ire-archive-backend/issues/11). Producer-side work is tracked in
+[data #48](https://github.com/ireapps/ire-archive-data/issues/48),
+[data #70](https://github.com/ireapps/ire-archive-data/issues/70), and
+[data #105](https://github.com/ireapps/ire-archive-data/issues/105). See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the required invariants.
+
+### Rules for future publication work
+
+- Preserve all frontend API and authentication shapes, stable resource URLs, pagination, metadata types, search
+  modes, and CORS/cookie behavior unless a coordinated cross-repository change is approved.
+- Derive stable public/vector IDs from permanent exported IDs. Preserve existing live vector IDs for confidently
+  matched records during migration.
+- Accept only authenticated, idempotent publication descriptors. Do not fetch arbitrary unvalidated URLs.
+- Build and validate a new collection, switch a Qdrant alias atomically, retain the prior collection for rollback,
+  invalidate caches, and report status to Django.
+- Never mutate the live collection in place for publication. A successful full snapshot must remove records that
+  are withdrawn or omitted.
+- `--no-clear-db` only skips collection recreation; it is not incremental synchronization.
+- Qdrant recovery does not replace Django/Postgres backup and restore procedures.
+
 ## Repository Structure
 
 ```
@@ -129,7 +160,11 @@ Frontend tests live in the frontend repo.
 
 ## Deployment
 
-Automated deploys to Fly.io on push to main via .github/workflows/ci-cd.yml. Manual commands live in scripts/prod_tasks.py (`make prod-...`). Production API: https://api.archive.ire.org
+Automated code deploys to Fly.io on push to main via `.github/workflows/ci-cd.yml`. Manual commands live in
+`scripts/prod_tasks.py` (`make prod-...`). Production API: https://api.archive.ire.org.
+
+Do not describe a code deploy as a data publication. The existing production indexing commands are legacy
+operator tools and do not yet implement the atomic publication design in backend issue #11.
 
 ## Key Configuration
 
