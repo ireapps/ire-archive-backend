@@ -464,23 +464,51 @@ class TestCollectionPublication:
         assert store.active_public_id("old-md5") == "public-id"
         assert store.alias_intents() == []
 
-    def test_supersession_uses_immutable_acceptance_order(self, tmp_path: Path):
+    def test_supersession_uses_immutable_acceptance_order(self, tmp_path: Path, monkeypatch):
+        import app.publication_service as publication_service
+
         store = PublicationStore(str(tmp_path / "state.sqlite"))
         older = _descriptor()
+        snapshot = _snapshot([_record()])
         newer = PublicationDescriptor(
             **{
                 **older.__dict__,
                 "publication_id": "7f5db2b1-4f4f-4f5d-8b2e-3dcce9fd44d3",
                 "publication_version": "2026.08.26.2",
+                "checksum": snapshot["checksum"],
             }
         )
+        snapshot["publication_id"] = newer.publication_id
+        path = _write_snapshot(tmp_path, snapshot)
+        qdrant = _FakeQdrant()
+        sparse = SimpleNamespace(as_object=lambda: {"indices": [], "values": []})
+        service = PublicationService(
+            store,
+            cast(Any, qdrant),
+            cast(Any, SimpleNamespace(encode=lambda _: SimpleNamespace(tolist=lambda: [0.1]))),
+            cast(Any, None),
+        )
+        monkeypatch.setattr(publication_service, "create_hybrid_collection", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            publication_service, "generate_embeddings_batch", lambda *args, **kwargs: ([[0.1]], [sparse])
+        )
+        monkeypatch.setattr(publication_service, "PUBLICATION_CALLBACK_SECRET", None)
+        monkeypatch.setattr(service, "_download", lambda _: path)
+
         store.enqueue(older)
+        store.update(older, "building")
         store.enqueue(newer)
         store.transition_with_event(older, SUCCEEDED)
 
         assert not store.is_superseded(newer)
 
-        store.transition_with_event(newer, SUCCEEDED)
+        service.run(newer)
+
+        assert store.get(newer.publication_id, newer.publication_version)["status"] == SUCCEEDED
+        assert (
+            qdrant.aliases[0].collection_name
+            == store.get(newer.publication_id, newer.publication_version)["collection_name"]
+        )
         assert store.is_superseded(older)
 
     def test_terminal_transition_persists_outbox_in_same_commit(self, tmp_path: Path):
