@@ -80,3 +80,5 @@ live owner and may take over only an expired lease. Startup never clears another
 
 If Qdrant confirms that an alias switch did not apply, that publication fails rather than remaining runnable. Recovery
 also marks an older interrupted build as superseded once a later cutover has completed, so it cannot replace newer data.
+The ordering uses a durable, monotonic acceptance sequence assigned when each descriptor is queued, not a build or
+callback timestamp.

@@ -113,12 +113,16 @@ class PublicationStore:
                     point_count INTEGER,
                     error_code TEXT,
                     message TEXT,
+                    acceptance_sequence INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (publication_id, publication_version)
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS publication_id_unique ON publications(publication_id);
                 CREATE UNIQUE INDEX IF NOT EXISTS publication_version_unique ON publications(publication_version);
+                CREATE TABLE IF NOT EXISTS publication_acceptance_sequence (
+                    sequence_id INTEGER PRIMARY KEY AUTOINCREMENT
+                );
                 CREATE TABLE IF NOT EXISTS publication_nonces (
                     nonce TEXT PRIMARY KEY,
                     expires_at INTEGER NOT NULL
@@ -179,6 +183,11 @@ class PublicationStore:
                 connection.execute(
                     "ALTER TABLE publication_build_lock ADD COLUMN lease_expires_at INTEGER NOT NULL DEFAULT 0"
                 )
+            publication_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(publications)").fetchall()
+            }
+            if "acceptance_sequence" not in publication_columns:
+                connection.execute("ALTER TABLE publications ADD COLUMN acceptance_sequence INTEGER NOT NULL DEFAULT 0")
 
     def _connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -266,11 +275,14 @@ class PublicationStore:
                     "publication_id or publication_version is already bound to a different descriptor",
                     409,
                 )
+            connection.execute("INSERT INTO publication_acceptance_sequence DEFAULT VALUES")
+            acceptance_sequence = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
             connection.execute(
                 """
                 INSERT INTO publications (
-                    publication_id, publication_version, descriptor_hash, descriptor_json, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    publication_id, publication_version, descriptor_hash, descriptor_json, status, acceptance_sequence,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     descriptor.publication_id,
@@ -278,6 +290,7 @@ class PublicationStore:
                     descriptor.descriptor_hash,
                     descriptor_json,
                     QUEUED,
+                    acceptance_sequence,
                     now,
                     now,
                 ),
@@ -578,8 +591,8 @@ class PublicationStore:
                 """
                 SELECT 1 FROM publications newer
                 WHERE newer.status IN (?, ?)
-                  AND newer.updated_at > (
-                    SELECT created_at FROM publications
+                  AND newer.acceptance_sequence > (
+                    SELECT acceptance_sequence FROM publications
                     WHERE publication_id = ? AND publication_version = ?
                   )
                 LIMIT 1

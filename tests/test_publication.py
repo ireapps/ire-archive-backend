@@ -464,7 +464,7 @@ class TestCollectionPublication:
         assert store.active_public_id("old-md5") == "public-id"
         assert store.alias_intents() == []
 
-    def test_completed_newer_publication_supersedes_older_interrupted_build(self, tmp_path: Path):
+    def test_supersession_uses_immutable_acceptance_order(self, tmp_path: Path):
         store = PublicationStore(str(tmp_path / "state.sqlite"))
         older = _descriptor()
         newer = PublicationDescriptor(
@@ -475,10 +475,12 @@ class TestCollectionPublication:
             }
         )
         store.enqueue(older)
-        time.sleep(0.001)
         store.enqueue(newer)
-        store.transition_with_event(newer, SUCCEEDED)
+        store.transition_with_event(older, SUCCEEDED)
 
+        assert not store.is_superseded(newer)
+
+        store.transition_with_event(newer, SUCCEEDED)
         assert store.is_superseded(older)
 
     def test_terminal_transition_persists_outbox_in_same_commit(self, tmp_path: Path):
