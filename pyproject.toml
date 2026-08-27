@@ -8,7 +8,7 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "sentence-transformers",
-    "qdrant-client==1.17.1",
+    "qdrant-client==1.18.0",
     "torch",
     "numpy",
     "pydantic",
