@@ -446,6 +446,23 @@ class PublicationStore:
             ).fetchone()
         return str(row["public_id"]) if row else None
 
+    def public_id_for_collection(self, collection_name: str, legacy_vector_id: str) -> str | None:
+        """Resolve a legacy link only against the collection a request has pinned."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT mapping.public_id
+                FROM publication_legacy_mappings mapping
+                JOIN publications publication
+                  ON publication.publication_id = mapping.publication_id
+                 AND publication.publication_version = mapping.publication_version
+                WHERE publication.collection_name = ? AND mapping.legacy_vector_id = ?
+                ORDER BY publication.updated_at DESC LIMIT 1
+                """,
+                (collection_name, legacy_vector_id),
+            ).fetchone()
+        return str(row["public_id"]) if row else None
+
     def active_legacy_mappings(self) -> dict[str, str]:
         with self._connection() as connection:
             rows = connection.execute("SELECT legacy_vector_id, public_id FROM active_legacy_vector_ids").fetchall()

@@ -534,6 +534,20 @@ class TestCollectionPublication:
         store.transition_with_event(second, SUCCEEDED, legacy_mappings=withdrawn)
         assert store.active_public_id("old-md5") is None
 
+    def test_resolves_legacy_id_only_for_pinned_collection(self, tmp_path: Path):
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        descriptor = _descriptor()
+        store.enqueue(descriptor)
+        store.transition_with_event(
+            descriptor,
+            SUCCEEDED,
+            collection_name="new-collection",
+            legacy_mappings={"old-md5": "public-id"},
+        )
+
+        assert store.public_id_for_collection("new-collection", "old-md5") == "public-id"
+        assert store.public_id_for_collection("old-collection", "old-md5") is None
+
     def test_serving_target_separates_inflight_cache_keys(self):
         old_key = get_cache_key("records", None, 0, 10, "relevance", serving_generation="old-target")
         new_key = get_cache_key("records", None, 0, 10, "relevance", serving_generation="new-target")

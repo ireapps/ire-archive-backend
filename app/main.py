@@ -606,11 +606,11 @@ async def get_resource(
     request: Request, response: Response, vector_id: str, session: Session = Depends(require_member)
 ):
     """Get a single resource by its permanent vector ID or a mapped legacy deep link."""
-    vector_id = resolve_legacy_vector_id(vector_id)
+    serving_collection = get_serving_generation()
+    vector_id = resolve_legacy_vector_id(vector_id, serving_collection)
     logger.info("resource_request", vector_id=vector_id, user_id=session.user_id)
 
     # Generate cache key
-    serving_collection = get_serving_generation()
     cache_key = f"resource:{serving_collection}:{vector_id}"
 
     # Check cache
@@ -763,11 +763,11 @@ async def get_similar_resources_endpoint(
     request: Request, response: Response, vector_id: str, session: Session = Depends(require_member)
 ):
     """Get similar resources based on vector similarity - cached for 24 hours - requires active membership"""
-    vector_id = resolve_legacy_vector_id(vector_id)
+    serving_collection = get_serving_generation()
+    vector_id = resolve_legacy_vector_id(vector_id, serving_collection)
     logger.info("similar_resources_request", vector_id=vector_id, user_id=session.user_id)
 
     # Generate cache key
-    serving_collection = get_serving_generation()
     cache_key = f"similar:{serving_collection}:{vector_id}"
 
     # Check cache

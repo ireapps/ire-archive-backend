@@ -254,10 +254,12 @@ def get_publication_service() -> Any:
     )
 
 
-def resolve_legacy_vector_id(vector_id: str) -> str:
-    """Resolve a pre-v2 deep link to the permanent public point ID, when mapped."""
+def resolve_legacy_vector_id(vector_id: str, collection_name: str | None = None) -> str:
+    """Resolve a legacy deep link against the collection pinned by this request."""
     if app_state.publication_store is None:
         return vector_id
+    if collection_name is not None:
+        return app_state.publication_store.public_id_for_collection(collection_name, vector_id) or vector_id
     return app_state.publication_store.active_public_id(vector_id) or vector_id
 
 
