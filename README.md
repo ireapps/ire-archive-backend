@@ -81,8 +81,8 @@ snapshot through `DATA_URL` as described below.
 ### Legacy production indexing
 
 The current production indexer can read `DATA_URL`, but it predates the publication architecture and must only be
-given a trusted, validated snapshot by an operator. It does not yet authenticate a publication descriptor or
-perform an atomic collection switch. Do not configure it to fetch arbitrary URLs.
+given a trusted, validated snapshot by an operator. It is not the approved publication endpoint and must not be
+configured to fetch arbitrary URLs.
 
 ```bash
 # Required: URL to the data file
@@ -121,6 +121,7 @@ uv run pytest tests/ -k test_search -v     # Specific tests
 ```bash
 uv run ruff check .              # Lint
 uv run ruff format --check .     # Format check
+uv run ty check app scripts tests # Static type check
 ```
 
 ---
@@ -157,9 +158,8 @@ make prod-rebuild         # Legacy code deploy + destructive reindex
 ```
 
 These are legacy operator commands, not the target publication workflow. `--no-clear-db` only skips collection
-recreation; it is not incremental synchronization and does not remove omitted or withdrawn records. Production
-publication must eventually follow the atomic process in
-[backend issue #11](https://github.com/ireapps/ire-archive-backend/issues/11).
+recreation; it is not incremental synchronization and does not remove omitted or withdrawn records. Approved
+snapshot publication uses [docs/PUBLICATION_API.md](docs/PUBLICATION_API.md), separately from code deployment.
 
 ### Environment Variables
 

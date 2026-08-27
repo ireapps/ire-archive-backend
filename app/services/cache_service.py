@@ -53,8 +53,22 @@ reranked_cache: TTLCache[str, list[Any]] = TTLCache(
 reranked_cache_metrics = {"hits": 0, "misses": 0}
 
 
+def clear_publication_caches() -> None:
+    """Clear every cache that can hold results from an old search collection."""
+    search_cache.clear()
+    similar_cache.clear()
+    resource_cache.clear()
+    reranked_cache.clear()
+
+
 def get_cache_key(
-    query: str, filters: dict | None, offset: int, limit: int, sort_by: str, search_mode: str = "hybrid"
+    query: str,
+    filters: dict | None,
+    offset: int,
+    limit: int,
+    sort_by: str,
+    search_mode: str = "hybrid",
+    serving_generation: str | int = 0,
 ) -> str:
     """Generate deterministic cache key from search parameters using MD5 hash.
 
@@ -83,12 +97,19 @@ def get_cache_key(
         "limit": limit,
         "sort_by": sort_by,
         "search_mode": search_mode,
+        "serving_generation": serving_generation,
     }
     cache_str = json.dumps(cache_data, sort_keys=True)
     return hashlib.md5(cache_str.encode()).hexdigest()
 
 
-def get_rerank_cache_key(query: str, filters: dict | None, sort_by: str, search_mode: str = "hybrid") -> str:
+def get_rerank_cache_key(
+    query: str,
+    filters: dict | None,
+    sort_by: str,
+    search_mode: str = "hybrid",
+    serving_generation: str | int = 0,
+) -> str:
     """Generate cache key for reranked results that EXCLUDES offset/limit.
 
     This ensures all pages of the same search share the same cached result set,
@@ -108,6 +129,7 @@ def get_rerank_cache_key(query: str, filters: dict | None, sort_by: str, search_
         "filters": filters or {},
         "sort_by": sort_by,
         "search_mode": search_mode,
+        "serving_generation": serving_generation,
     }
     cache_str = json.dumps(cache_data, sort_keys=True)
     return hashlib.md5(cache_str.encode()).hexdigest()

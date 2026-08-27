@@ -10,7 +10,6 @@ from qdrant_client.models import Filter, Fusion, FusionQuery, Prefetch, Record, 
 from sentence_transformers import SentenceTransformer
 
 from app.config import (
-    COLLECTION_NAME,
     DEFAULT_SCORE,
     DEFAULT_SCORE_THRESHOLD,
     DENSE_PREFETCH_MULTIPLIER,
@@ -18,6 +17,7 @@ from app.config import (
     RERANK_CANDIDATE_MULTIPLIER,
     SCROLL_BATCH_SIZE,
     SPARSE_PREFETCH_MULTIPLIER,
+    get_serving_collection_name,
 )
 from app.diagnostics import (
     SearchDiagnostics,
@@ -188,6 +188,7 @@ def _build_hybrid_query(
 def _fetch_all_filtered_records(
     qdrant_client: QdrantClient,
     qdrant_filter: Filter,
+    collection_name: str | None = None,
 ) -> list[Record | ScoredPoint]:
     """Fetch all records matching a filter using Qdrant scroll API.
 
@@ -205,12 +206,13 @@ def _fetch_all_filtered_records(
         Fetches in batches of SCROLL_BATCH_SIZE (100) until all records
         matching the filter have been retrieved.
     """
+    collection_name = collection_name or get_serving_collection_name()
     all_records: list[Record | ScoredPoint] = []
     offset_point = None
 
     while True:
         records, offset_point = qdrant_client.scroll(
-            collection_name=COLLECTION_NAME,
+            collection_name=collection_name,
             scroll_filter=qdrant_filter,
             limit=SCROLL_BATCH_SIZE,
             offset=offset_point,
@@ -234,6 +236,7 @@ def perform_filter_only_search(
     limit: int,
     offset: int,
     sort_by: str,
+    collection_name: str | None = None,
 ) -> tuple[list[ScoredPoint | Record], int]:
     """Perform filter-only browse without semantic search.
 
@@ -259,7 +262,7 @@ def perform_filter_only_search(
     logger.info("filter_only_browse", offset=offset, limit=limit, sort_by=sort_by)
 
     # Fetch all matching records
-    all_records = _fetch_all_filtered_records(qdrant_client, qdrant_filter)
+    all_records = _fetch_all_filtered_records(qdrant_client, qdrant_filter, collection_name)
 
     # Apply date sorting if requested
     if sort_by in ["newest", "oldest"]:
@@ -279,6 +282,7 @@ def perform_keyword_search(
     offset: int,
     sort_by: str,
     qdrant_filter: Filter | None,
+    collection_name: str | None = None,
 ) -> tuple[list[ScoredPoint | Record], int]:
     """Perform keyword-only search using BM25 sparse embeddings.
 
@@ -309,6 +313,7 @@ def perform_keyword_search(
         sort_by=sort_by,
     )
 
+    collection_name = collection_name or get_serving_collection_name()
     # Generate sparse embedding for keyword matching
     sparse_embedding = list(sparse_model.embed([query]))[0]
     log_sparse_embedding(query, sparse_embedding)
@@ -328,7 +333,7 @@ def perform_keyword_search(
 
     # Query using only sparse vector (keyword matching)
     results: list[ScoredPoint] = qdrant_client.query_points(
-        collection_name=COLLECTION_NAME,
+        collection_name=collection_name,
         query=sparse_vector,
         using="sparse",
         limit=fetch_limit,
@@ -360,6 +365,8 @@ def perform_semantic_search(
     sort_by: str,
     qdrant_filter: Filter | None,
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
+    serving_generation: str | int = 0,
+    collection_name: str | None = None,
 ) -> tuple[list[ScoredPoint | Record], int]:
     """Perform semantic search with hybrid (dense + sparse) embeddings.
 
@@ -380,6 +387,7 @@ def perform_semantic_search(
     Returns:
         Tuple of (paginated_results, total_count)
     """
+    collection_name = collection_name or get_serving_collection_name()
     # Convert filter to dict for cache key (None-safe)
     filter_dict: dict[str, Any] | None = None
     if qdrant_filter:
@@ -387,7 +395,7 @@ def perform_semantic_search(
         filter_dict = qdrant_filter.model_dump() if hasattr(qdrant_filter, "model_dump") else None
 
     # Check reranked cache first (key excludes offset/limit for consistent pagination)
-    rerank_cache_key = get_rerank_cache_key(query, filter_dict, sort_by)
+    rerank_cache_key = get_rerank_cache_key(query, filter_dict, sort_by, serving_generation=serving_generation)
 
     if rerank_cache_key in reranked_cache:
         reranked_cache_metrics["hits"] += 1
@@ -439,7 +447,7 @@ def perform_semantic_search(
 
     # Fetch candidates
     results: list[ScoredPoint] = qdrant_client.query_points(
-        collection_name=COLLECTION_NAME,
+        collection_name=collection_name,
         prefetch=prefetch,
         query=fusion_query,
         limit=fetch_limit,

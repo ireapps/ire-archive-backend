@@ -29,6 +29,7 @@ dependencies = [
     "slowapi>=0.1.9",
     "redis>=5.0.0",
     "itsdangerous>=2.1.0",
+    "ijson>=3.3.0",
 ]
 authors = [
     { name = "Investigative Reporters & Editors", email = "help@ire.org" },
@@ -37,7 +38,10 @@ description = "FastAPI backend for archive.ire.org"
 readme = "README.md"
 
 [project.optional-dependencies]
-dev = ["pre-commit"]
+dev = [
+    "pre-commit",
+    "ty>=0.0.75",
+]
 test = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

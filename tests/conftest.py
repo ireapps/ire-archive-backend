@@ -1,6 +1,7 @@
 """Pytest configuration and shared fixtures for backend tests."""
 
 from unittest.mock import MagicMock, Mock
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -72,6 +73,9 @@ def mock_qdrant_client():
     mock_collection_info.status = "green"
     mock_collection_info.indexed_vectors_count = 1000
     mock.get_collection.return_value = mock_collection_info
+    mock.get_aliases.return_value = SimpleNamespace(
+        aliases=[SimpleNamespace(alias_name="nonprofit_knowledge_live", collection_name="nonprofit_knowledge")]
+    )
 
     # Add search method for similar resources
     mock.search.return_value = []
