@@ -67,6 +67,8 @@ def enforce_stream_limits(
     escaped = False
     token = bytearray()
     last_key: str | None = None
+    last_key_escaped = False
+    token_escaped = False
     current_key: str | None = None
     records_array = False
     item_started = False
@@ -92,6 +94,7 @@ def enforce_stream_limits(
                         escaped = False
                     elif byte == 92:
                         escaped = True
+                        token_escaped = True
                     elif byte == 34:
                         in_string = False
                         was_extracting_text = extracting_text
@@ -100,6 +103,7 @@ def enforce_stream_limits(
                             last_key = token.decode("utf-8")
                         except UnicodeDecodeError:
                             last_key = None
+                        last_key_escaped = token_escaped
                         if was_extracting_text:
                             current_key = None
                     elif len(token) < 128:
@@ -113,6 +117,7 @@ def enforce_stream_limits(
                     in_string = True
                     escaped = False
                     token.clear()
+                    token_escaped = False
                     if records_array and item_started and current_key == "extracted_text":
                         extracting_text = True
                         extracted_text_bytes = 0
@@ -120,8 +125,11 @@ def enforce_stream_limits(
                 if byte in b" \t\r\n":
                     continue
                 if byte == 58:
+                    if last_key_escaped:
+                        raise SnapshotValidationError("Snapshot object keys must not use JSON escape sequences")
                     current_key = last_key
                     last_key = None
+                    last_key_escaped = False
                 elif current_key == "records" and byte == 91:
                     records_array = True
                     current_key = None

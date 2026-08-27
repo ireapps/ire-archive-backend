@@ -360,7 +360,7 @@ def perform_semantic_search(
     sort_by: str,
     qdrant_filter: Filter | None,
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
-    serving_generation: int = 0,
+    serving_generation: str | int = 0,
 ) -> tuple[list[ScoredPoint | Record], int]:
     """Perform semantic search with hybrid (dense + sparse) embeddings.
 

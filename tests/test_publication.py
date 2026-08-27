@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 
 from app.dependencies import get_publication_service
@@ -176,6 +177,13 @@ class TestStreamingSnapshotValidation:
         )
         with pytest.raises(SnapshotValidationError, match="records item"):
             enforce_stream_limits(scalar, max_record_bytes=100)
+
+    def test_preparser_rejects_escaped_object_keys(self, tmp_path: Path):
+        path = tmp_path / "escaped-key.json"
+        path.write_text('{"\\u0072ecords":[]}', encoding="utf-8")
+
+        with pytest.raises(SnapshotValidationError, match="object keys"):
+            enforce_stream_limits(path)
 
     def test_rejects_duplicate_public_and_download_ids(self, tmp_path: Path):
         first = _record(1)
@@ -362,6 +370,93 @@ class TestCollectionPublication:
         assert qdrant.aliases[0].collection_name == "legacy"
         assert qdrant.deleted
 
+    def test_alias_timeout_reconciles_when_qdrant_applied_the_switch(self, tmp_path: Path, monkeypatch):
+        import app.publication_service as publication_service
+
+        snapshot = _snapshot([_record()])
+        path = _write_snapshot(tmp_path, snapshot)
+        descriptor = PublicationDescriptor(**{**_descriptor().__dict__, "checksum": snapshot["checksum"]})
+        qdrant = _FakeQdrant()
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        store.enqueue(descriptor)
+        sparse = SimpleNamespace(as_object=lambda: {"indices": [], "values": []})
+        service = PublicationService(
+            store,
+            cast(Any, qdrant),
+            cast(Any, SimpleNamespace(encode=lambda _: SimpleNamespace(tolist=lambda: [0.1]))),
+            cast(Any, None),
+        )
+        monkeypatch.setattr(publication_service, "create_hybrid_collection", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            publication_service, "generate_embeddings_batch", lambda *args, **kwargs: ([[0.1]], [sparse])
+        )
+        monkeypatch.setattr(publication_service, "PUBLICATION_CALLBACK_SECRET", None)
+        monkeypatch.setattr(service, "_download", lambda _: path)
+
+        def switch_then_timeout(collection_name: str):
+            qdrant.aliases = [SimpleNamespace(alias_name="nonprofit_knowledge_live", collection_name=collection_name)]
+            raise httpx.ReadTimeout("response lost")
+
+        monkeypatch.setattr(service, "_switch_alias", switch_then_timeout)
+        service.run(descriptor)
+
+        assert store.get(descriptor.publication_id, descriptor.publication_version)["status"] == SUCCEEDED
+        assert store.serving_generation() == 1
+        assert store.alias_intents() == []
+
+    def test_rollback_timeout_reconciles_when_qdrant_applied_the_switch(self, tmp_path: Path, monkeypatch):
+        import app.publication_service as publication_service
+
+        descriptor = _descriptor()
+        qdrant = _FakeQdrant()
+        qdrant.aliases = [SimpleNamespace(alias_name="nonprofit_knowledge_live", collection_name="new")]
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        store.enqueue(descriptor)
+        store.transition_with_event(
+            descriptor,
+            SUCCEEDED,
+            collection_name="new",
+            previous_collection_name="legacy",
+            legacy_mappings={},
+        )
+        service = PublicationService(store, cast(Any, qdrant), cast(Any, None), cast(Any, None))
+        monkeypatch.setattr(publication_service, "PUBLICATION_CALLBACK_SECRET", None)
+
+        def switch_then_timeout(collection_name: str):
+            qdrant.aliases = [SimpleNamespace(alias_name="nonprofit_knowledge_live", collection_name=collection_name)]
+            raise httpx.ReadTimeout("response lost")
+
+        monkeypatch.setattr(service, "_switch_alias", switch_then_timeout)
+
+        assert service.rollback(descriptor)["status"] == "rolled_back"
+        assert store.alias_intents() == []
+
+    def test_restart_reconciles_saved_publish_intent(self, tmp_path: Path, monkeypatch):
+        import app.publication_service as publication_service
+
+        descriptor = _descriptor()
+        qdrant = _FakeQdrant()
+        qdrant.aliases = [SimpleNamespace(alias_name="nonprofit_knowledge_live", collection_name="published")]
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        store.enqueue(descriptor)
+        store.stage_alias_intent(
+            descriptor,
+            operation="publish",
+            target_collection_name="published",
+            previous_collection_name="legacy",
+            legacy_mappings={"old-md5": "public-id"},
+            record_count=1,
+            point_count=1,
+        )
+        service = PublicationService(store, cast(Any, qdrant), cast(Any, None), cast(Any, None))
+        monkeypatch.setattr(publication_service, "PUBLICATION_CALLBACK_SECRET", None)
+
+        service.recover()
+
+        assert store.get(descriptor.publication_id, descriptor.publication_version)["status"] == SUCCEEDED
+        assert store.active_public_id("old-md5") == "public-id"
+        assert store.alias_intents() == []
+
     def test_terminal_transition_persists_outbox_in_same_commit(self, tmp_path: Path):
         store = PublicationStore(str(tmp_path / "state.sqlite"))
         descriptor = _descriptor()
@@ -415,23 +510,10 @@ class TestCollectionPublication:
         store.transition_with_event(second, SUCCEEDED, legacy_mappings=withdrawn)
         assert store.active_public_id("old-md5") is None
 
-    def test_serving_generation_separates_inflight_cache_keys(self, tmp_path: Path):
-        store = PublicationStore(str(tmp_path / "state.sqlite"))
-        descriptor = _descriptor()
-        store.enqueue(descriptor)
-        old_generation = store.serving_generation()
-        old_key = get_cache_key("records", None, 0, 10, "relevance", serving_generation=old_generation)
+    def test_serving_target_separates_inflight_cache_keys(self):
+        old_key = get_cache_key("records", None, 0, 10, "relevance", serving_generation="old-target")
+        new_key = get_cache_key("records", None, 0, 10, "relevance", serving_generation="new-target")
 
-        store.transition_with_event(
-            descriptor,
-            SUCCEEDED,
-            advance_serving_generation=True,
-            legacy_mappings={},
-        )
-
-        new_generation = store.serving_generation()
-        new_key = get_cache_key("records", None, 0, 10, "relevance", serving_generation=new_generation)
-        assert new_generation == old_generation + 1
         assert new_key != old_key
 
     def test_prune_retains_live_and_one_rollback_collection(self, tmp_path: Path):
@@ -464,6 +546,20 @@ class TestCollectionPublication:
         store.release_build_lock(descriptor, owner)
         assert not store.acquire_build_lock(descriptor)
         store.release_build_lock(_descriptor(), replacement)
+
+    def test_alias_action_requires_live_lock_owner(self, tmp_path: Path):
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        descriptor = _descriptor()
+        owner = store.acquire_build_lock(descriptor)
+        assert owner
+
+        assert store.while_holding_build_lock(descriptor, owner, lambda: "switched") == "switched"
+        with store._connection() as connection:
+            connection.execute("UPDATE publication_build_lock SET lease_expires_at = 0")
+        replacement = store.acquire_build_lock(descriptor)
+        assert replacement
+        with pytest.raises(PublicationError, match="lease expired"):
+            store.while_holding_build_lock(descriptor, owner, lambda: "must-not-run")
 
     def test_rejects_path_traversal_in_allowlisted_url(self):
         assert not _is_allowed_https_url(

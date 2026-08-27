@@ -261,8 +261,12 @@ def resolve_legacy_vector_id(vector_id: str) -> str:
     return app_state.publication_store.active_public_id(vector_id) or vector_id
 
 
-def get_serving_generation() -> int:
-    """Read the durable generation that scopes all cached serving results."""
-    if app_state.publication_store is None:
-        return 0
-    return app_state.publication_store.serving_generation()
+def get_serving_generation() -> str:
+    """Use the actual Qdrant alias target to isolate cache entries across a cutover."""
+    if app_state.qdrant_client is None:
+        return "uninitialized"
+    aliases = app_state.qdrant_client.get_aliases().aliases
+    return next(
+        (str(alias.collection_name) for alias in aliases if alias.alias_name == SERVING_COLLECTION_ALIAS),
+        SERVING_COLLECTION_ALIAS,
+    )

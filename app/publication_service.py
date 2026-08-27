@@ -10,11 +10,11 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -55,6 +55,7 @@ from app.services.cache_service import clear_publication_caches
 from scripts.qdrant_ops import create_hybrid_collection, generate_embeddings_batch
 
 logger = structlog.get_logger()
+T = TypeVar("T")
 
 QUEUED = "queued"
 BUILDING = "building"
@@ -155,6 +156,18 @@ class PublicationStore:
                     generation INTEGER NOT NULL
                 );
                 INSERT OR IGNORE INTO publication_serving_state (state_id, generation) VALUES (1, 0);
+                CREATE TABLE IF NOT EXISTS publication_alias_intents (
+                    publication_id TEXT NOT NULL,
+                    publication_version TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    target_collection_name TEXT NOT NULL,
+                    previous_collection_name TEXT,
+                    legacy_mappings_json TEXT NOT NULL,
+                    record_count INTEGER,
+                    point_count INTEGER,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (publication_id, publication_version)
+                );
                 """
             )
             columns = {
@@ -320,6 +333,7 @@ class PublicationStore:
         *,
         legacy_mappings: dict[str, str] | None = None,
         advance_serving_generation: bool = False,
+        clear_alias_intent: bool = False,
         **values: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Persist a state transition and its callback outbox row in one transaction."""
@@ -373,7 +387,57 @@ class PublicationStore:
                 raise PublicationError("PUBLICATION_NOT_FOUND", "Publication was not found", 404)
             state = dict(row)
             event = self._insert_event(connection, descriptor, state)
+            if clear_alias_intent:
+                connection.execute(
+                    "DELETE FROM publication_alias_intents WHERE publication_id = ? AND publication_version = ?",
+                    (descriptor.publication_id, descriptor.publication_version),
+                )
         return state, event
+
+    def stage_alias_intent(
+        self,
+        descriptor: PublicationDescriptor,
+        *,
+        operation: str,
+        target_collection_name: str,
+        previous_collection_name: str | None,
+        legacy_mappings: dict[str, str],
+        record_count: int | None,
+        point_count: int | None,
+    ) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO publication_alias_intents
+                (publication_id, publication_version, operation, target_collection_name, previous_collection_name,
+                 legacy_mappings_json, record_count, point_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    descriptor.publication_id,
+                    descriptor.publication_version,
+                    operation,
+                    target_collection_name,
+                    previous_collection_name,
+                    json.dumps(legacy_mappings, sort_keys=True, separators=(",", ":")),
+                    record_count,
+                    point_count,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+
+    def alias_intents(self) -> list[tuple[PublicationDescriptor, dict[str, Any]]]:
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM publication_alias_intents ORDER BY created_at").fetchall()
+        return [
+            (
+                PublicationDescriptor(
+                    **json.loads(self.get(row["publication_id"], row["publication_version"])["descriptor_json"])
+                ),
+                dict(row),
+            )
+            for row in rows
+        ]
 
     def active_public_id(self, legacy_vector_id: str) -> str | None:
         with self._connection() as connection:
@@ -564,6 +628,35 @@ class PublicationStore:
             )
         return updated.rowcount == 1
 
+    def while_holding_build_lock(
+        self,
+        descriptor: PublicationDescriptor,
+        owner_id: str,
+        action: Callable[[], T],
+    ) -> T:
+        """Fence an alias mutation by retaining SQLite's write lock through it."""
+        now = int(time.time())
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lock = connection.execute(
+                """
+                SELECT lease_expires_at FROM publication_build_lock
+                WHERE lock_name = 'publisher' AND publication_id = ? AND publication_version = ? AND owner_id = ?
+                """,
+                (descriptor.publication_id, descriptor.publication_version, owner_id),
+            ).fetchone()
+            if lock is None or lock["lease_expires_at"] < now:
+                raise PublicationError("BUILD_LOCK_LOST", "Publication build lease expired before alias switch", 409)
+            result = action()
+            connection.execute(
+                """
+                UPDATE publication_build_lock SET lease_expires_at = ?
+                WHERE lock_name = 'publisher' AND owner_id = ?
+                """,
+                (now + PUBLICATION_BUILD_LOCK_LEASE_SECONDS, owner_id),
+            )
+        return result
+
     def release_build_lock(self, descriptor: PublicationDescriptor, owner_id: str) -> None:
         with self._connection() as connection:
             connection.execute(
@@ -671,11 +764,13 @@ class PublicationService:
     def _transition(self, descriptor: PublicationDescriptor, status: str, **values: Any) -> dict[str, Any]:
         legacy_mappings = values.pop("legacy_mappings", None)
         advance_serving_generation = values.pop("advance_serving_generation", False)
+        clear_alias_intent = values.pop("clear_alias_intent", False)
         state, event = self.store.transition_with_event(
             descriptor,
             status,
             legacy_mappings=legacy_mappings,
             advance_serving_generation=advance_serving_generation,
+            clear_alias_intent=clear_alias_intent,
             **values,
         )
         self.deliver_event(event)
@@ -854,6 +949,36 @@ class PublicationService:
         threading.Thread(target=renew, name="publication-lock-heartbeat", daemon=True).start()
         return stopped
 
+    def _mark_succeeded(
+        self,
+        descriptor: PublicationDescriptor,
+        collection_name: str,
+        previous_collection_name: str | None,
+        record_count: int,
+        point_count: int,
+        legacy_mappings: dict[str, str],
+        clear_alias_intent: bool = False,
+    ) -> dict[str, Any]:
+        clear_publication_caches()
+        state = self._transition(
+            descriptor,
+            SUCCEEDED,
+            legacy_mappings=legacy_mappings,
+            advance_serving_generation=True,
+            clear_alias_intent=clear_alias_intent,
+            collection_name=collection_name,
+            previous_collection_name=previous_collection_name,
+            record_count=record_count,
+            point_count=point_count,
+            error_code=None,
+            message="Publication is serving through the Qdrant alias",
+        )
+        try:
+            self._prune_collections(collection_name, previous_collection_name)
+        except Exception:
+            logger.exception("publication_collection_prune_failed", collection_name=collection_name)
+        return state
+
     def run(self, descriptor: PublicationDescriptor) -> None:
         owner_id: str | None = None
         while owner_id is None:
@@ -873,22 +998,26 @@ class PublicationService:
         path: Path | None = None
         collection_name: str | None = None
         alias_switched = False
+        alias_switch_attempted = False
+        previous: str | None = None
+        metadata: dict[str, Any] | None = None
+        point_count = 0
+        legacy_mappings: dict[str, str] = {}
         try:
             collection_name = self._collection_name(descriptor)
             # Never recreate a collection that became live before a process stopped.
             if self._current_alias_target() == collection_name:
                 info = self.qdrant_client.get_collection(collection_name)
-                clear_publication_caches()
-                state = self._transition(
+                if info.points_count is None:
+                    raise PublicationError("QDRANT_COUNT_MISSING", "Qdrant did not report a point count", 422)
+                self._mark_succeeded(
                     descriptor,
-                    SUCCEEDED,
-                    legacy_mappings=self.store.legacy_mappings(descriptor),
-                    advance_serving_generation=True,
-                    collection_name=collection_name,
-                    record_count=info.points_count,
-                    point_count=info.points_count,
-                    error_code=None,
-                    message="Publication is serving through the Qdrant alias",
+                    collection_name,
+                    state["previous_collection_name"],
+                    info.points_count,
+                    info.points_count,
+                    self.store.legacy_mappings(descriptor),
+                    clear_alias_intent=True,
                 )
                 return
             path = self._download(descriptor)
@@ -938,32 +1067,45 @@ class PublicationService:
                         "SEARCH_VALIDATION_FAILED", "New collection failed representative search validation", 422
                     )
             self.store.stage_legacy_mappings(descriptor, legacy_mappings)
-            if not self.store.renew_build_lock(descriptor, owner_id):
-                raise PublicationError("BUILD_LOCK_LOST", "Publication build lease expired before alias switch", 409)
-            self._switch_alias(collection_name)
-            alias_switched = True
-            clear_publication_caches()
-            state = self._transition(
+            self.store.stage_alias_intent(
                 descriptor,
-                SUCCEEDED,
-                legacy_mappings=legacy_mappings,
-                advance_serving_generation=True,
-                collection_name=collection_name,
+                operation="publish",
+                target_collection_name=collection_name,
                 previous_collection_name=previous,
+                legacy_mappings=legacy_mappings,
                 record_count=metadata["record_count"],
                 point_count=point_count,
-                error_code=None,
-                message="Publication is serving through the Qdrant alias",
             )
-            try:
-                self._prune_collections(collection_name, previous)
-            except Exception:
-                logger.exception("publication_collection_prune_failed", collection_name=collection_name)
+            alias_switch_attempted = True
+            previous = self.store.while_holding_build_lock(
+                descriptor, owner_id, lambda: self._switch_alias(collection_name)
+            )
+            alias_switched = True
+            self._mark_succeeded(
+                descriptor,
+                collection_name,
+                previous,
+                metadata["record_count"],
+                point_count,
+                legacy_mappings,
+                clear_alias_intent=True,
+            )
         except Exception as exc:  # Errors are recorded and reported without changing the serving alias.
-            if alias_switched:
-                # Qdrant and SQLite cannot share one transaction. The staged
-                # mapping lets restart recovery finish this already-live cutover.
-                logger.exception("publication_post_alias_recovery_required", collection_name=collection_name)
+            if alias_switched or alias_switch_attempted:
+                if collection_name and self._current_alias_target() == collection_name and metadata is not None:
+                    self._mark_succeeded(
+                        descriptor,
+                        collection_name,
+                        previous,
+                        metadata["record_count"],
+                        point_count,
+                        legacy_mappings,
+                        clear_alias_intent=True,
+                    )
+                    return
+                # An alias request can time out after Qdrant applies it. Keep
+                # the durable state retryable when the target cannot be read.
+                logger.exception("publication_alias_reconciliation_required", collection_name=collection_name)
                 return
             code, message = _safe_message(exc)
             self._transition(descriptor, FAILED, error_code=code, message=message)
@@ -1019,13 +1161,28 @@ class PublicationService:
                     409,
                 )
             target = state["previous_collection_name"]
-            self._switch_alias(target)
+            target_mappings = self.store.legacy_mappings_for_collection(target)
+            self.store.stage_alias_intent(
+                descriptor,
+                operation="rollback",
+                target_collection_name=target,
+                previous_collection_name=state["collection_name"],
+                legacy_mappings=target_mappings,
+                record_count=None,
+                point_count=None,
+            )
+            try:
+                self.store.while_holding_build_lock(descriptor, owner_id, lambda: self._switch_alias(target))
+            except Exception:
+                if self._current_alias_target() != target:
+                    raise
             clear_publication_caches()
             state = self._transition(
                 descriptor,
                 ROLLED_BACK,
-                legacy_mappings=self.store.legacy_mappings_for_collection(target),
+                legacy_mappings=target_mappings,
                 advance_serving_generation=True,
+                clear_alias_intent=True,
                 message="Serving alias restored to the retained prior collection",
             )
             self._prune_collections(target, state["collection_name"])
@@ -1034,8 +1191,42 @@ class PublicationService:
             heartbeat_stopped.set()
             self.store.release_build_lock(descriptor, owner_id)
 
+    def _reconcile_alias_intents(self) -> None:
+        """Finish an alias move recorded before a process lost its response."""
+        for descriptor, intent in self.store.alias_intents():
+            owner_id = self.store.acquire_build_lock(descriptor)
+            if owner_id is None:
+                continue
+            try:
+                if self._current_alias_target() != intent["target_collection_name"]:
+                    continue
+                mappings = json.loads(intent["legacy_mappings_json"])
+                if intent["operation"] == "publish":
+                    self._mark_succeeded(
+                        descriptor,
+                        intent["target_collection_name"],
+                        intent["previous_collection_name"],
+                        int(intent["record_count"]),
+                        int(intent["point_count"]),
+                        mappings,
+                        clear_alias_intent=True,
+                    )
+                else:
+                    clear_publication_caches()
+                    self._transition(
+                        descriptor,
+                        ROLLED_BACK,
+                        legacy_mappings=mappings,
+                        advance_serving_generation=True,
+                        clear_alias_intent=True,
+                        message="Serving alias restored to the retained prior collection",
+                    )
+            finally:
+                self.store.release_build_lock(descriptor, owner_id)
+
     def recover(self) -> None:
         """Resume interrupted builds and retry callbacks after a process restart."""
+        self._reconcile_alias_intents()
         for event in self.store.outstanding_events():
             self.deliver_event(event)
         for descriptor, state in self.store.terminal_states_without_events():

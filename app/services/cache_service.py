@@ -68,7 +68,7 @@ def get_cache_key(
     limit: int,
     sort_by: str,
     search_mode: str = "hybrid",
-    serving_generation: int = 0,
+    serving_generation: str | int = 0,
 ) -> str:
     """Generate deterministic cache key from search parameters using MD5 hash.
 
@@ -108,7 +108,7 @@ def get_rerank_cache_key(
     filters: dict | None,
     sort_by: str,
     search_mode: str = "hybrid",
-    serving_generation: int = 0,
+    serving_generation: str | int = 0,
 ) -> str:
     """Generate cache key for reranked results that EXCLUDES offset/limit.
 

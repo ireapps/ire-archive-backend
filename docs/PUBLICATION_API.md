@@ -69,9 +69,10 @@ body and moves only the alias - no download or re-embedding. Every new point ID 
 `public_id`; a durable, active legacy-vector-ID lookup resolves only confidently matched old resource links. Failed
 build collections are removed, and successful cutovers retain only the live collection and one rollback target.
 
-The durable serving generation advances with each cutover or rollback. All process-local search, resource, similar,
-and reranking cache keys include that generation, so a request that started before a switch cannot populate the new
-generation and separate API workers stop using old results immediately.
+Before an alias move, the backend writes a durable intent containing the target, counts, and legacy-link mapping. On
+restart or retry it reads Qdrant's actual alias target and finishes a recorded move before handling other work. Cache
+keys use that actual target, so a request that started before a switch can only populate old-target entries and
+separate API workers stop using old results immediately.
 
 Build and rollback share a durable owner lease. Active workers renew it while working; a restarted process waits for a
 live owner and may take over only an expired lease. Startup never clears another worker's lock.

@@ -74,11 +74,12 @@ changes the alias only after the snapshot, point count, and representative query
 Every v2 record uses its permanent `public_id` as its Qdrant point ID and API `vector_id`, including records that
 confidently match an existing point by legacy Django `metadata.id` and title. For those conservative matches, the
 backend durably records a legacy-vector-ID-to-`public_id` lookup only when the alias changes. This keeps old deep links
-working without allowing a transitional ID to become a new collection's identity.
+working without allowing a transitional ID to become a new collection's identity. Before moving the alias, the backend records
+a durable intent and reconciles it against Qdrant's actual target after a timeout or restart.
 
 Those mappings are carried to later complete snapshots only when their `public_id` still exists; an omitted or
-withdrawn resource deliberately loses its old link. A durable serving generation advances with each alias move and is
-part of every cache key, preventing in-flight pre-switch requests or another API process from serving cached old data.
+withdrawn resource deliberately loses its old link. Cache keys include Qdrant's resolved serving collection target,
+preventing in-flight pre-switch requests or another API process from serving cached old data.
 
 ## Tracking
 
