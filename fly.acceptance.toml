@@ -1,6 +1,6 @@
-# Staff acceptance only. Deploy this file manually from backend commit
-# 2cf588567e80b85414025b20d52d2ef515f4a143; it is intentionally separate
-# from the production fly.toml and production GitHub Actions workflows.
+# Staff acceptance only. Deploy only a reviewed commit that contains this file
+# and has 2cf588567e80b85414025b20d52d2ef515f4a143 as an ancestor. It is
+# intentionally separate from the production fly.toml and GitHub Actions workflows.
 app = "ire-archive-acceptance-search"
 primary_region = "ord"
 kill_signal = "SIGINT"

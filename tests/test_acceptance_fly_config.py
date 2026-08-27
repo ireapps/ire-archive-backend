@@ -5,6 +5,7 @@ import tomllib
 
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "fly.acceptance.toml"
+PROTECTED_PUBLICATION_COMMIT = "2cf588567e80b85414025b20d52d2ef515f4a143"
 
 
 def test_acceptance_fly_config_is_isolated_from_production() -> None:
@@ -36,6 +37,7 @@ def test_acceptance_fly_config_is_isolated_from_production() -> None:
         "FRONTEND_URL",
     ):
         assert forbidden_value not in config_text
+    assert f"has {PROTECTED_PUBLICATION_COMMIT} as an ancestor" in config_text
 
 
 def test_acceptance_fly_config_keeps_qdrant_private_and_persistent() -> None:
@@ -65,3 +67,10 @@ def test_acceptance_fly_config_keeps_qdrant_private_and_persistent() -> None:
         }
     ]
     assert config["vm"] == [{"cpu_kind": "shared", "cpus": 2, "memory_mb": 4096}]
+
+
+def test_acceptance_deploy_guidance_requires_publication_support() -> None:
+    readme = (CONFIG_PATH.parent / "README.md").read_text()
+
+    assert f"git merge-base --is-ancestor {PROTECTED_PUBLICATION_COMMIT} HEAD" in readme
+    assert "Record the resulting exact reviewed main revision" in readme

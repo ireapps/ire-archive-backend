@@ -168,10 +168,12 @@ snapshot publication uses [docs/PUBLICATION_API.md](docs/PUBLICATION_API.md), se
 `qdrant_acceptance_data` volume. It deliberately contains no publication, legacy data URL, Redis, MemberSuite, or
 production-domain settings.
 
-Deploy only the approved backend commit, after the acceptance app and its volume have been created:
+Deploy only a reviewed merged-main commit that contains this configuration and the protected-publication release,
+after the acceptance app and its volume have been created:
 
 ```bash
-git rev-parse HEAD  # Must print 5572dbb6de4945ca2d8959331c91be16a0044b73
+git merge-base --is-ancestor 2cf588567e80b85414025b20d52d2ef515f4a143 HEAD
+git rev-parse HEAD  # Record the resulting exact reviewed main revision before deployment.
 fly deploy --config fly.acceptance.toml --app ire-archive-acceptance-search --remote-only
 ```
 
