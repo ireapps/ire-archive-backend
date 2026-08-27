@@ -431,9 +431,7 @@ async def lifespan(app: FastAPI):
         )
 
         # Create session manager
-        app.state.session_manager = SessionManager(
-            app.state.redis, auth_settings
-        )
+        app.state.session_manager = SessionManager(app.state.redis, auth_settings)
 
     yield
 
