@@ -51,8 +51,9 @@ test = [
     "pytest-env",
     "pytest-vcr",
     "pytest-xdist",
+    "pyyaml>=6.0",
 ]
-mypy = ["mypy", "types-cachetools", "types-python-dateutil", "types-requests"]
+mypy = ["mypy", "types-cachetools", "types-python-dateutil", "types-requests", "types-PyYAML"]
 notebooks = ["jupyterlab", "pandas", "altair", "tabulate"]
 
 [tool.ruff]

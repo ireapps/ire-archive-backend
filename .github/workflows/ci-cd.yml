@@ -23,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
+      production: ${{ steps.filter.outputs.production }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -36,12 +37,26 @@ jobs:
               - 'app/**'
               - 'scripts/**'
               - 'tests/**'
+              - 'README.md'
+              - 'fly.acceptance.toml'
               - 'pyproject.toml'
               - 'uv.lock'
               - 'docker/Dockerfile'
               - 'docker/Dockerfile.base'
               - 'fly.toml'
               - 'docker/docker-compose.yml'
+              - 'docker/supervisord.conf'
+              - 'docker/entrypoint.sh'
+              - 'docker/config/qdrant.yaml'
+              - '.github/workflows/ci-cd.yml'
+            production:
+              - 'app/**'
+              - 'scripts/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'docker/Dockerfile'
+              - 'docker/Dockerfile.base'
+              - 'fly.toml'
               - 'docker/supervisord.conf'
               - 'docker/entrypoint.sh'
               - 'docker/config/qdrant.yaml'
@@ -146,7 +161,7 @@ jobs:
     if: |
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
-      needs.changes.outputs.backend == 'true' &&
+      needs.changes.outputs.production == 'true' &&
       !contains(github.event.head_commit.message, '[skip deploy]')
     environment:
       name: production-backend
