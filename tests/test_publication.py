@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hmac
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -564,7 +566,16 @@ class TestCollectionPublication:
                     ),
                 )
 
-        store = PublicationStore(str(path))
+        barrier = threading.Barrier(2)
+
+        def initialize_store(_: int) -> PublicationStore:
+            barrier.wait()
+            return PublicationStore(str(path))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            stores = list(executor.map(initialize_store, range(2)))
+
+        store = stores[0]
         store.transition_with_event(newer, SUCCEEDED)
         next_descriptor = PublicationDescriptor(
             **{

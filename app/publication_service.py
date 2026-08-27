@@ -174,21 +174,21 @@ class PublicationStore:
                 );
                 """
             )
-            columns = {
-                row["name"] for row in connection.execute("PRAGMA table_info(publication_build_lock)").fetchall()
-            }
-            if "owner_id" not in columns:
-                connection.execute("ALTER TABLE publication_build_lock ADD COLUMN owner_id TEXT")
-            if "lease_expires_at" not in columns:
-                connection.execute(
-                    "ALTER TABLE publication_build_lock ADD COLUMN lease_expires_at INTEGER NOT NULL DEFAULT 0"
-                )
-            publication_columns = {
-                row["name"] for row in connection.execute("PRAGMA table_info(publications)").fetchall()
-            }
-            if "acceptance_sequence" not in publication_columns:
-                connection.execute("BEGIN IMMEDIATE")
-                try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                lock_columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(publication_build_lock)").fetchall()
+                }
+                if "owner_id" not in lock_columns:
+                    connection.execute("ALTER TABLE publication_build_lock ADD COLUMN owner_id TEXT")
+                if "lease_expires_at" not in lock_columns:
+                    connection.execute(
+                        "ALTER TABLE publication_build_lock ADD COLUMN lease_expires_at INTEGER NOT NULL DEFAULT 0"
+                    )
+                publication_columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(publications)").fetchall()
+                }
+                if "acceptance_sequence" not in publication_columns:
                     connection.execute(
                         "ALTER TABLE publications ADD COLUMN acceptance_sequence INTEGER NOT NULL DEFAULT 0"
                     )
@@ -214,11 +214,11 @@ class PublicationStore:
                             "INSERT INTO publication_acceptance_sequence (sequence_id) VALUES (?)",
                             (existing_sequence + len(rows),),
                         )
-                except Exception:
-                    connection.rollback()
-                    raise
-                else:
-                    connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
 
     def _connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
