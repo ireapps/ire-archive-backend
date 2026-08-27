@@ -27,7 +27,12 @@ def _matches(filters: list[str], path: str) -> bool:
 def test_acceptance_changes_run_ci_without_qualifying_for_production_deploy() -> None:
     filters = _filters()
 
-    for path in ("README.md", "fly.acceptance.toml", "tests/test_acceptance_fly_config.py"):
+    for path in (
+        "README.md",
+        "fly.acceptance.toml",
+        "tests/test_acceptance_fly_config.py",
+        ".github/workflows/ci-cd.yml",
+    ):
         assert _matches(filters["backend"], path), path
         assert not _matches(filters["production"], path), path
 
@@ -46,7 +51,6 @@ def test_production_runtime_changes_qualify_for_ci_and_deployment() -> None:
         "docker/entrypoint.sh",
         "docker/config/qdrant.yaml",
         "fly.toml",
-        ".github/workflows/ci-cd.yml",
     )
 
     for path in production_paths:

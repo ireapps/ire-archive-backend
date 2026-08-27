@@ -60,7 +60,6 @@ jobs:
               - 'docker/supervisord.conf'
               - 'docker/entrypoint.sh'
               - 'docker/config/qdrant.yaml'
-              - '.github/workflows/ci-cd.yml'
 
   backend-tests:
     name: Backend Tests
