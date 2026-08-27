@@ -10,7 +10,6 @@ from qdrant_client.models import Filter, Fusion, FusionQuery, Prefetch, Record, 
 from sentence_transformers import SentenceTransformer
 
 from app.config import (
-    COLLECTION_NAME,
     DEFAULT_SCORE,
     DEFAULT_SCORE_THRESHOLD,
     DENSE_PREFETCH_MULTIPLIER,
@@ -18,6 +17,7 @@ from app.config import (
     RERANK_CANDIDATE_MULTIPLIER,
     SCROLL_BATCH_SIZE,
     SPARSE_PREFETCH_MULTIPLIER,
+    get_serving_collection_name,
 )
 from app.diagnostics import (
     SearchDiagnostics,
@@ -210,7 +210,7 @@ def _fetch_all_filtered_records(
 
     while True:
         records, offset_point = qdrant_client.scroll(
-            collection_name=COLLECTION_NAME,
+            collection_name=get_serving_collection_name(),
             scroll_filter=qdrant_filter,
             limit=SCROLL_BATCH_SIZE,
             offset=offset_point,
@@ -328,7 +328,7 @@ def perform_keyword_search(
 
     # Query using only sparse vector (keyword matching)
     results: list[ScoredPoint] = qdrant_client.query_points(
-        collection_name=COLLECTION_NAME,
+        collection_name=get_serving_collection_name(),
         query=sparse_vector,
         using="sparse",
         limit=fetch_limit,
@@ -439,7 +439,7 @@ def perform_semantic_search(
 
     # Fetch candidates
     results: list[ScoredPoint] = qdrant_client.query_points(
-        collection_name=COLLECTION_NAME,
+        collection_name=get_serving_collection_name(),
         prefetch=prefetch,
         query=fusion_query,
         limit=fetch_limit,

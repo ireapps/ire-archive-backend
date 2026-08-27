@@ -53,6 +53,14 @@ reranked_cache: TTLCache[str, list[Any]] = TTLCache(
 reranked_cache_metrics = {"hits": 0, "misses": 0}
 
 
+def clear_publication_caches() -> None:
+    """Clear every cache that can hold results from an old search collection."""
+    search_cache.clear()
+    similar_cache.clear()
+    resource_cache.clear()
+    reranked_cache.clear()
+
+
 def get_cache_key(
     query: str, filters: dict | None, offset: int, limit: int, sort_by: str, search_mode: str = "hybrid"
 ) -> str:

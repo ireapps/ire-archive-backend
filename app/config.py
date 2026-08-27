@@ -23,6 +23,9 @@ QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
 #: Qdrant collection name for storing vectors
 COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "nonprofit_knowledge")
 
+#: Stable alias used by the API. Publication builds replace its target, never its contents.
+SERVING_COLLECTION_ALIAS: str = os.getenv("SERVING_COLLECTION_ALIAS", f"{COLLECTION_NAME}_live")
+
 #: Timeout in seconds for Qdrant operations
 QDRANT_TIMEOUT: int = 60
 
@@ -172,6 +175,35 @@ MAX_LIMIT: int = int(os.getenv("MAX_LIMIT", "100"))
 #: Unified batch size for embedding generation and upload
 BATCH_SIZE: int = 1000
 
+# === PUBLICATION CONFIGURATION ===
+
+# Publication endpoints remain disabled until both independent signing secrets and
+# narrow URL rules are configured.
+PUBLICATION_DISPATCH_SECRET: str | None = os.getenv("PUBLICATION_DISPATCH_SECRET")
+PUBLICATION_CALLBACK_SECRET: str | None = os.getenv("PUBLICATION_CALLBACK_SECRET")
+PUBLICATION_STATE_DB: str = os.getenv("PUBLICATION_STATE_DB", "/data/qdrant_storage/publication-state.sqlite3")
+PUBLICATION_WORK_DIR: str = os.getenv("PUBLICATION_WORK_DIR", "/tmp/ire-publications")
+PUBLICATION_SNAPSHOT_URL_PREFIXES: tuple[str, ...] = tuple(
+    value.strip() for value in os.getenv("PUBLICATION_SNAPSHOT_URL_PREFIXES", "").split(",") if value.strip()
+)
+PUBLICATION_CALLBACK_URLS: tuple[str, ...] = tuple(
+    value.strip() for value in os.getenv("PUBLICATION_CALLBACK_URLS", "").split(",") if value.strip()
+)
+PUBLICATION_CALLBACK_URL_PREFIXES: tuple[str, ...] = tuple(
+    value.strip() for value in os.getenv("PUBLICATION_CALLBACK_URL_PREFIXES", "").split(",") if value.strip()
+)
+PUBLICATION_MAX_REQUEST_BYTES: int = int(os.getenv("PUBLICATION_MAX_REQUEST_BYTES", "16384"))
+PUBLICATION_MAX_SNAPSHOT_BYTES: int = int(os.getenv("PUBLICATION_MAX_SNAPSHOT_BYTES", "2147483648"))
+PUBLICATION_MAX_UPLOAD_BYTES: int = int(os.getenv("PUBLICATION_MAX_UPLOAD_BYTES", "8000000"))
+PUBLICATION_SIGNATURE_MAX_AGE_SECONDS: int = int(os.getenv("PUBLICATION_SIGNATURE_MAX_AGE_SECONDS", "300"))
+PUBLICATION_CALLBACK_RETRIES: int = int(os.getenv("PUBLICATION_CALLBACK_RETRIES", "3"))
+
+
+def get_serving_collection_name() -> str:
+    """Return the alias that API reads use instead of a mutable collection."""
+    return SERVING_COLLECTION_ALIAS
+
+
 # === STATIC CATEGORY FILTERS ===
 
 #: Valid categories in the IRE resources dataset
@@ -249,3 +281,7 @@ assert MAX_OFFSET > 0, "MAX_OFFSET must be positive"
 assert MIN_LIMIT >= 1, "MIN_LIMIT must be at least 1"
 assert MAX_LIMIT >= MIN_LIMIT, "MAX_LIMIT must be >= MIN_LIMIT"
 assert MIN_LIMIT <= DEFAULT_LIMIT <= MAX_LIMIT, "DEFAULT_LIMIT must be between MIN_LIMIT and MAX_LIMIT"
+assert PUBLICATION_MAX_REQUEST_BYTES > 0, "PUBLICATION_MAX_REQUEST_BYTES must be positive"
+assert PUBLICATION_MAX_SNAPSHOT_BYTES > 0, "PUBLICATION_MAX_SNAPSHOT_BYTES must be positive"
+assert PUBLICATION_MAX_UPLOAD_BYTES > 0, "PUBLICATION_MAX_UPLOAD_BYTES must be positive"
+assert PUBLICATION_SIGNATURE_MAX_AGE_SECONDS > 0, "PUBLICATION_SIGNATURE_MAX_AGE_SECONDS must be positive"

@@ -39,7 +39,6 @@ from app.auth.routes import router as auth_router
 from app.auth.session import Session
 from app.config import (
     ALLOWED_ORIGINS,
-    COLLECTION_NAME,
     QDRANT_HOST,
     QDRANT_PORT,
     RATE_LIMIT_ADMIN,
@@ -47,11 +46,14 @@ from app.config import (
     RATE_LIMIT_SEARCH,
     RATE_LIMIT_STATS,
     VECTOR_SIZE,
+    get_serving_collection_name,
 )
 from app.dependencies import get_embedding_model, get_qdrant_client, get_sparse_model, lifespan
 from app.exceptions import APIError, ResourceNotFoundError
 from app.models import ErrorResponse, SearchQuery, SearchResponse, SimilarResource, SimilarResourcesResponse
 from app.rate_limit import RateLimitBypassMiddleware, limit_with_bypass, limiter, rate_limit_exceeded_handler
+from app.publication_routes import router as publication_router
+from app.publication_service import PublicationError
 from app.services.cache_service import (
     cache_metrics,
     get_cache_key,
@@ -93,6 +95,7 @@ app.add_middleware(RateLimitBypassMiddleware)
 
 # Include auth router
 app.include_router(auth_router)
+app.include_router(publication_router)
 logger.info("auth_router_included")
 
 # Update CORS origins to include auth frontend if configured
@@ -203,6 +206,21 @@ async def membersuite_error_handler(request: Request, exc: MemberSuiteError):
     return JSONResponse(status_code=exc.status_code, content=error_response.model_dump())
 
 
+@app.exception_handler(PublicationError)
+async def publication_error_handler(request: Request, exc: PublicationError):
+    """Return safe, consistent responses for publication authentication and validation."""
+    request_id = getattr(request.state, "request_id", None)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ErrorResponse(
+            error=exc.code,
+            message=str(exc),
+            status_code=exc.status_code,
+            request_id=request_id,
+        ).model_dump(),
+    )
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError):
     """Handle Pydantic validation errors with user-friendly messages."""
@@ -266,8 +284,8 @@ async def root():
         "service": "Semantic Search API",
         "model": "all-MiniLM-L6-v2 (cached)",
         "vector_db": f"qdrant://{QDRANT_HOST}:{QDRANT_PORT}",
-        "collection": COLLECTION_NAME,
-        "documents": qdrant_client.get_collection(COLLECTION_NAME).points_count,
+        "collection": get_serving_collection_name(),
+        "documents": qdrant_client.get_collection(get_serving_collection_name()).points_count,
         "endpoints": {
             "search": "/search",
             "stats": "/stats",
@@ -414,7 +432,7 @@ async def get_stats(request: Request, response: Response):
     """Get collection statistics including cache metrics and vector configuration diagnostics"""
     logger.info("stats_request")
     qdrant_client = get_qdrant_client()
-    info = qdrant_client.get_collection(COLLECTION_NAME)
+    info = qdrant_client.get_collection(get_serving_collection_name())
 
     # Calculate search cache hit rate
     total_requests = cache_metrics["hits"] + cache_metrics["misses"]
@@ -469,7 +487,7 @@ async def get_stats(request: Request, response: Response):
                     sparse_vectors_configured = True
 
     return {
-        "collection": COLLECTION_NAME,
+        "collection": get_serving_collection_name(),
         "total_points": info.points_count,
         "vectors_size": VECTOR_SIZE,
         "distance": "cosine",
@@ -588,7 +606,7 @@ async def get_resource(
 
     # Retrieve the point directly by its ID
     result = qdrant_client.retrieve(
-        collection_name=COLLECTION_NAME,
+        collection_name=get_serving_collection_name(),
         ids=[vector_id],
         with_payload=True,
     )
@@ -635,7 +653,7 @@ async def get_embedding_diagnostic(request: Request, response: Response, vector_
 
     # Retrieve the point with vectors
     result = qdrant_client.retrieve(
-        collection_name=COLLECTION_NAME,
+        collection_name=get_serving_collection_name(),
         ids=[vector_id],
         with_payload=True,
         with_vectors=True,
@@ -752,7 +770,7 @@ async def get_similar_resources_endpoint(
     if not similar_resources and vector_id:
         # Try to check if the point exists
         result = qdrant_client.retrieve(
-            collection_name=COLLECTION_NAME,
+            collection_name=get_serving_collection_name(),
             ids=[vector_id],
             with_payload=False,
         )

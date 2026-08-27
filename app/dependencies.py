@@ -1,14 +1,15 @@
 """Application dependencies and lifecycle management."""
 
 from contextlib import asynccontextmanager
-from typing import Optional
+import asyncio
+from typing import Any, Optional
 
 import httpx
 import structlog
 from fastapi import FastAPI, HTTPException, Request
 from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
+from qdrant_client.models import CreateAlias, CreateAliasOperation, Distance, VectorParams
 from redis.asyncio import Redis
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
@@ -25,6 +26,7 @@ from app.config import (
     QDRANT_PORT,
     SPARSE_MODEL_NAME,
     VECTOR_SIZE,
+    SERVING_COLLECTION_ALIAS,
 )
 from app.diagnostics import log_environment_info
 
@@ -41,6 +43,7 @@ class AppState:
     ms_http_client: httpx.AsyncClient | None = None
     session_manager: SessionManager | None = None
     membersuite_client: MemberSuiteClient | None = None
+    publication_store: Any = None
 
 
 # Singleton instance
@@ -110,6 +113,16 @@ async def lifespan(app: FastAPI):
         else:
             info = app_state.qdrant_client.get_collection(COLLECTION_NAME)
             logger.info("collection_exists", collection_name=COLLECTION_NAME, points_count=info.points_count)
+        aliases = app_state.qdrant_client.get_aliases().aliases
+        if not any(alias.alias_name == SERVING_COLLECTION_ALIAS for alias in aliases):
+            app_state.qdrant_client.update_collection_aliases(
+                change_aliases_operations=[
+                    CreateAliasOperation(
+                        create_alias=CreateAlias(collection_name=COLLECTION_NAME, alias_name=SERVING_COLLECTION_ALIAS)
+                    )
+                ]
+            )
+            logger.info("serving_alias_created", alias=SERVING_COLLECTION_ALIAS, collection_name=COLLECTION_NAME)
 
     except Exception as e:
         logger.error("qdrant_connection_failed", error=str(e))
@@ -155,6 +168,19 @@ async def lifespan(app: FastAPI):
 
     # Log environment info for cross-platform debugging
     log_environment_info()
+
+    # The store is intentionally SQLite-backed, not an in-memory task registry.
+    # It lets queued work and callback delivery survive an application restart.
+    from app.publication_service import PublicationStore, PublicationService
+
+    app_state.publication_store = PublicationStore()
+    publication_service = PublicationService(
+        app_state.publication_store,
+        app_state.qdrant_client,
+        app_state.embedding_model,
+        app_state.sparse_model,
+    )
+    asyncio.create_task(asyncio.to_thread(publication_service.recover))
 
     logger.info("fastapi_startup_complete")
 
@@ -212,3 +238,17 @@ def get_membersuite_client(request: Request) -> MemberSuiteClient:
     if app_state.membersuite_client is None:
         raise HTTPException(503, "Authentication service not configured")
     return app_state.membersuite_client
+
+
+def get_publication_service() -> Any:
+    """Build a publication worker around the already initialized application clients."""
+    from app.publication_service import PublicationService, PublicationStore
+
+    if app_state.publication_store is None:
+        app_state.publication_store = PublicationStore()
+    return PublicationService(
+        app_state.publication_store,
+        get_qdrant_client(),
+        get_embedding_model(),
+        get_sparse_model(),
+    )

@@ -126,7 +126,10 @@ jobs:
           cache-dependency-glob: "**/pyproject.toml"
 
       - name: Install dependencies
-        run: uv sync --extra test --extra mypy
+        run: uv sync --extra test --extra mypy --extra dev
+
+      - name: Run ty
+        run: uv run ty check app/publication_contract.py app/publication_routes.py app/publication_service.py
 
       - name: Run mypy
         run: uv run mypy .
