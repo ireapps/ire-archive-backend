@@ -59,8 +59,9 @@ batches at a time. Before `ijson` reads any record, the raw stream rejects a rec
 validated canonical record is also limited to 20,000,000 bytes. Each `extracted_text` is limited to 5,000,000
 characters, and at most 50,000 extracted-text characters contribute to one resource's searchable content. These
 limits bound parser materialization and must be enforced by the producer too. The raw guard limits every item in the
-`records` array, including malformed scalar or array values, before `ijson` receives it. The public download metadata
-keeps its ID, order, URL, name, file, and size; extraction-only text is not returned to browsers.
+`records` array, including malformed scalar or array values, before `ijson` receives it, and rejects nesting deeper
+than 100 levels. The public download metadata keeps its ID, order, URL, name, file, and size; extraction-only text is
+not returned to browsers.
 
 After exact point-count and representative-query validation, one Qdrant alias update moves
 `SERVING_COLLECTION_ALIAS` to the new collection. Failure never moves the alias. The prior target remains for
@@ -76,3 +77,6 @@ separate API workers stop using old results immediately.
 
 Build and rollback share a durable owner lease. Active workers renew it while working; a restarted process waits for a
 live owner and may take over only an expired lease. Startup never clears another worker's lock.
+
+If Qdrant confirms that an alias switch did not apply, that publication fails rather than remaining runnable. Recovery
+also marks an older interrupted build as superseded once a later cutover has completed, so it cannot replace newer data.

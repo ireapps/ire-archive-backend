@@ -341,7 +341,7 @@ async def search(request: Request, response: Response, query: SearchQuery, sessi
     qdrant_client = get_qdrant_client()
 
     # Generate cache key (include search_mode to avoid mixing cached results)
-    serving_generation = get_serving_generation()
+    serving_collection = get_serving_generation()
     cache_key = get_cache_key(
         query.query or "",
         filters,
@@ -349,7 +349,7 @@ async def search(request: Request, response: Response, query: SearchQuery, sessi
         query.limit,
         query.sort_by,
         query.search_mode,
-        serving_generation,
+        serving_collection,
     )
 
     # Check cache
@@ -367,7 +367,7 @@ async def search(request: Request, response: Response, query: SearchQuery, sessi
     # FILTER-ONLY BROWSE MODE: No query but filters exist
     if (not query.query or query.query.strip() == "") and qdrant_filter:
         paginated_results, total_count = perform_filter_only_search(
-            qdrant_client, qdrant_filter, query.limit, query.offset, query.sort_by
+            qdrant_client, qdrant_filter, query.limit, query.offset, query.sort_by, serving_collection
         )
         formatted_results = format_search_results(paginated_results)
 
@@ -406,6 +406,7 @@ async def search(request: Request, response: Response, query: SearchQuery, sessi
             query.offset,
             query.sort_by,
             qdrant_filter,
+            serving_collection,
         )
     else:
         # HYBRID SEARCH (default): Use dense + sparse vectors with RRF fusion
@@ -418,7 +419,8 @@ async def search(request: Request, response: Response, query: SearchQuery, sessi
             query.offset,
             query.sort_by,
             qdrant_filter,
-            serving_generation=serving_generation,
+            serving_generation=serving_collection,
+            collection_name=serving_collection,
         )
     formatted_results = format_search_results(paginated_results)
 
@@ -608,8 +610,8 @@ async def get_resource(
     logger.info("resource_request", vector_id=vector_id, user_id=session.user_id)
 
     # Generate cache key
-    serving_generation = get_serving_generation()
-    cache_key = f"resource:{serving_generation}:{vector_id}"
+    serving_collection = get_serving_generation()
+    cache_key = f"resource:{serving_collection}:{vector_id}"
 
     # Check cache
     if cache_key in resource_cache:
@@ -625,7 +627,7 @@ async def get_resource(
 
     # Retrieve the point directly by its ID
     result = qdrant_client.retrieve(
-        collection_name=get_serving_collection_name(),
+        collection_name=serving_collection,
         ids=[vector_id],
         with_payload=True,
     )
@@ -765,8 +767,8 @@ async def get_similar_resources_endpoint(
     logger.info("similar_resources_request", vector_id=vector_id, user_id=session.user_id)
 
     # Generate cache key
-    serving_generation = get_serving_generation()
-    cache_key = f"similar:{serving_generation}:{vector_id}"
+    serving_collection = get_serving_generation()
+    cache_key = f"similar:{serving_collection}:{vector_id}"
 
     # Check cache
     if cache_key in similar_cache:
@@ -785,13 +787,14 @@ async def get_similar_resources_endpoint(
         qdrant_client=qdrant_client,
         vector_id=vector_id,
         limit=5,
+        collection_name=serving_collection,
     )
 
     # Check if source resource was found
     if not similar_resources and vector_id:
         # Try to check if the point exists
         result = qdrant_client.retrieve(
-            collection_name=get_serving_collection_name(),
+            collection_name=serving_collection,
             ids=[vector_id],
             with_payload=False,
         )

@@ -554,6 +554,23 @@ class PublicationStore:
             ).fetchall()
         return [PublicationDescriptor(**json.loads(row["descriptor_json"])) for row in rows]
 
+    def is_superseded(self, descriptor: PublicationDescriptor) -> bool:
+        """Do not let a recovered older build move the alias after a newer cutover."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM publications newer
+                WHERE newer.status IN (?, ?)
+                  AND newer.updated_at > (
+                    SELECT created_at FROM publications
+                    WHERE publication_id = ? AND publication_version = ?
+                  )
+                LIMIT 1
+                """,
+                (SUCCEEDED, ROLLED_BACK, descriptor.publication_id, descriptor.publication_version),
+            ).fetchone()
+        return row is not None
+
     def terminal_states_without_events(self) -> list[tuple[PublicationDescriptor, dict[str, Any]]]:
         """Find legacy/crash-interrupted terminal rows that need an outbox event."""
         terminal_states = (SUCCEEDED, FAILED, ROLLED_BACK)
@@ -993,6 +1010,16 @@ class PublicationService:
         if state["status"] not in {QUEUED, BUILDING}:
             self.store.release_build_lock(descriptor, owner_id)
             return
+        if self.store.is_superseded(descriptor):
+            self._transition(
+                descriptor,
+                FAILED,
+                clear_alias_intent=True,
+                error_code="PUBLICATION_SUPERSEDED",
+                message="A newer publication has already changed the serving collection",
+            )
+            self.store.release_build_lock(descriptor, owner_id)
+            return
         heartbeat_stopped = self._start_lock_heartbeat(descriptor, owner_id)
         state = self._transition(descriptor, BUILDING)
         path: Path | None = None
@@ -1101,6 +1128,15 @@ class PublicationService:
                         point_count,
                         legacy_mappings,
                         clear_alias_intent=True,
+                    )
+                    return
+                if self._current_alias_target() is not None:
+                    self._transition(
+                        descriptor,
+                        FAILED,
+                        clear_alias_intent=True,
+                        error_code="ALIAS_SWITCH_NOT_APPLIED",
+                        message="Qdrant did not switch the serving alias",
                     )
                     return
                 # An alias request can time out after Qdrant applies it. Keep

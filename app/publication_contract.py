@@ -13,7 +13,11 @@ from typing import Any, cast
 from urllib.parse import urlparse
 
 import ijson
-from app.config import PUBLICATION_MAX_EXTRACTED_TEXT_CHARS, PUBLICATION_MAX_RECORD_BYTES
+from app.config import (
+    PUBLICATION_MAX_EXTRACTED_TEXT_CHARS,
+    PUBLICATION_MAX_RECORD_BYTES,
+    PUBLICATION_MAX_RECORD_NESTING_DEPTH,
+)
 
 SCHEMA_VERSION = "2.0"
 ALLOWED_CATEGORIES = frozenset({"audio", "contest entry", "dataset", "journal", "tipsheet", "webinar"})
@@ -50,6 +54,7 @@ DOWNLOAD_KEYS = frozenset(
 )
 MAX_RECORD_BYTES = PUBLICATION_MAX_RECORD_BYTES
 MAX_EXTRACTED_TEXT_CHARS = PUBLICATION_MAX_EXTRACTED_TEXT_CHARS
+MAX_RECORD_NESTING_DEPTH = PUBLICATION_MAX_RECORD_NESTING_DEPTH
 
 
 class SnapshotValidationError(ValueError):
@@ -61,6 +66,7 @@ def enforce_stream_limits(
     *,
     max_record_bytes: int = MAX_RECORD_BYTES,
     max_extracted_text_bytes: int = MAX_RECORD_BYTES,
+    max_record_nesting_depth: int = MAX_RECORD_NESTING_DEPTH,
 ) -> None:
     """Bound every records-array item before ijson materializes it."""
     in_string = False
@@ -138,9 +144,13 @@ def enforce_stream_limits(
                     item_bytes = 1
                     item_is_container = byte in {91, 123}
                     item_depth = 1 if item_is_container else 0
+                    if item_depth > max_record_nesting_depth:
+                        raise SnapshotValidationError("Snapshot records item exceeds the configured nesting depth")
                 elif records_array and item_started and item_is_container:
                     if byte in {91, 123}:
                         item_depth += 1
+                        if item_depth > max_record_nesting_depth:
+                            raise SnapshotValidationError("Snapshot records item exceeds the configured nesting depth")
                     elif byte in {93, 125}:
                         item_depth -= 1
                         if item_depth == 0:

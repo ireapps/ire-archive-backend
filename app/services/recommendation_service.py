@@ -12,6 +12,7 @@ def get_similar_resources(
     qdrant_client: QdrantClient,
     vector_id: str,
     limit: int = 5,
+    collection_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Find similar resources based on vector similarity.
 
@@ -23,9 +24,10 @@ def get_similar_resources(
     Returns:
         List of similar resources with metadata and scores
     """
+    collection_name = collection_name or get_serving_collection_name()
     # Step 0: Retrieve the point by its ID to get the resource_id
     point_result = qdrant_client.retrieve(
-        collection_name=get_serving_collection_name(),
+        collection_name=collection_name,
         ids=[vector_id],
         with_payload=True,
     )
@@ -53,7 +55,7 @@ def get_similar_resources(
     )
 
     current_chunks = qdrant_client.scroll(
-        collection_name=get_serving_collection_name(),
+        collection_name=collection_name,
         scroll_filter=current_resource_filter,
         limit=SIMILAR_CHUNK_SCROLL_LIMIT,
         with_payload=True,
@@ -83,7 +85,7 @@ def get_similar_resources(
     fetch_limit = limit * SIMILAR_FETCH_MULTIPLIER
 
     similar_points = qdrant_client.query_points(
-        collection_name=get_serving_collection_name(),
+        collection_name=collection_name,
         query=dense_query,
         using="dense",
         limit=fetch_limit,

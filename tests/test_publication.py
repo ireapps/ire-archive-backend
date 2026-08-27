@@ -185,6 +185,13 @@ class TestStreamingSnapshotValidation:
         with pytest.raises(SnapshotValidationError, match="object keys"):
             enforce_stream_limits(path)
 
+    def test_preparser_rejects_deeply_nested_records_item(self, tmp_path: Path):
+        path = tmp_path / "deep.json"
+        path.write_text('{"records":' + "[" * 102 + "0" + "]" * 102 + "}", encoding="utf-8")
+
+        with pytest.raises(SnapshotValidationError, match="nesting depth"):
+            enforce_stream_limits(path, max_record_nesting_depth=100)
+
     def test_rejects_duplicate_public_and_download_ids(self, tmp_path: Path):
         first = _record(1)
         duplicate_public = _record(2)
@@ -456,6 +463,23 @@ class TestCollectionPublication:
         assert store.get(descriptor.publication_id, descriptor.publication_version)["status"] == SUCCEEDED
         assert store.active_public_id("old-md5") == "public-id"
         assert store.alias_intents() == []
+
+    def test_completed_newer_publication_supersedes_older_interrupted_build(self, tmp_path: Path):
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        older = _descriptor()
+        newer = PublicationDescriptor(
+            **{
+                **older.__dict__,
+                "publication_id": "7f5db2b1-4f4f-4f5d-8b2e-3dcce9fd44d3",
+                "publication_version": "2026.08.26.2",
+            }
+        )
+        store.enqueue(older)
+        time.sleep(0.001)
+        store.enqueue(newer)
+        store.transition_with_event(newer, SUCCEEDED)
+
+        assert store.is_superseded(older)
 
     def test_terminal_transition_persists_outbox_in_same_commit(self, tmp_path: Path):
         store = PublicationStore(str(tmp_path / "state.sqlite"))
