@@ -82,3 +82,5 @@ If Qdrant confirms that an alias switch did not apply, that publication fails ra
 also marks an older interrupted build as superseded once a later cutover has completed, so it cannot replace newer data.
 The ordering uses a durable, monotonic acceptance sequence assigned when each descriptor is queued, not a build or
 callback timestamp.
+When upgrading an existing state database, stored publications are backfilled once in deterministic creation order
+(`created_at`, then publication ID and version), and subsequent descriptors receive values above that backfill.

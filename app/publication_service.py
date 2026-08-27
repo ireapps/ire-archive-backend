@@ -187,7 +187,38 @@ class PublicationStore:
                 row["name"] for row in connection.execute("PRAGMA table_info(publications)").fetchall()
             }
             if "acceptance_sequence" not in publication_columns:
-                connection.execute("ALTER TABLE publications ADD COLUMN acceptance_sequence INTEGER NOT NULL DEFAULT 0")
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    connection.execute(
+                        "ALTER TABLE publications ADD COLUMN acceptance_sequence INTEGER NOT NULL DEFAULT 0"
+                    )
+                    existing_sequence = connection.execute(
+                        "SELECT COALESCE(MAX(sequence_id), 0) FROM publication_acceptance_sequence"
+                    ).fetchone()[0]
+                    rows = connection.execute(
+                        """
+                        SELECT publication_id, publication_version FROM publications
+                        ORDER BY created_at, publication_id, publication_version
+                        """
+                    ).fetchall()
+                    for offset, row in enumerate(rows, start=1):
+                        connection.execute(
+                            """
+                            UPDATE publications SET acceptance_sequence = ?
+                            WHERE publication_id = ? AND publication_version = ?
+                            """,
+                            (existing_sequence + offset, row["publication_id"], row["publication_version"]),
+                        )
+                    if rows:
+                        connection.execute(
+                            "INSERT INTO publication_acceptance_sequence (sequence_id) VALUES (?)",
+                            (existing_sequence + len(rows),),
+                        )
+                except Exception:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
 
     def _connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)

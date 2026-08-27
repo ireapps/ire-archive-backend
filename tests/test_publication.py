@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -510,6 +511,80 @@ class TestCollectionPublication:
             == store.get(newer.publication_id, newer.publication_version)["collection_name"]
         )
         assert store.is_superseded(older)
+
+    def test_migration_backfills_existing_acceptance_order(self, tmp_path: Path):
+        path = tmp_path / "state.sqlite"
+        older = _descriptor()
+        newer = PublicationDescriptor(
+            **{
+                **older.__dict__,
+                "publication_id": "7f5db2b1-4f4f-4f5d-8b2e-3dcce9fd44d3",
+                "publication_version": "2026.08.26.2",
+            }
+        )
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE publications (
+                    publication_id TEXT NOT NULL,
+                    publication_version TEXT NOT NULL,
+                    descriptor_hash TEXT NOT NULL,
+                    descriptor_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    collection_name TEXT,
+                    previous_collection_name TEXT,
+                    record_count INTEGER,
+                    point_count INTEGER,
+                    error_code TEXT,
+                    message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (publication_id, publication_version)
+                )
+                """
+            )
+            for descriptor, created_at in (
+                (older, "2026-08-26T00:00:00+00:00"),
+                (newer, "2026-08-26T00:01:00+00:00"),
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO publications (
+                        publication_id, publication_version, descriptor_hash, descriptor_json, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        descriptor.publication_id,
+                        descriptor.publication_version,
+                        descriptor.descriptor_hash,
+                        descriptor.canonical_bytes().decode(),
+                        QUEUED,
+                        created_at,
+                        created_at,
+                    ),
+                )
+
+        store = PublicationStore(str(path))
+        store.transition_with_event(newer, SUCCEEDED)
+        next_descriptor = PublicationDescriptor(
+            **{
+                **newer.__dict__,
+                "publication_id": "8f5db2b1-4f4f-4f5d-8b2e-3dcce9fd44d3",
+                "publication_version": "2026.08.26.3",
+            }
+        )
+        next_state, _ = store.enqueue(next_descriptor)
+
+        assert store.is_superseded(older)
+        assert not store.is_superseded(newer)
+        assert (
+            store.get(older.publication_id, older.publication_version)["acceptance_sequence"]
+            < store.get(newer.publication_id, newer.publication_version)["acceptance_sequence"]
+        )
+        assert (
+            next_state["acceptance_sequence"]
+            > store.get(newer.publication_id, newer.publication_version)["acceptance_sequence"]
+        )
 
     def test_terminal_transition_persists_outbox_in_same_commit(self, tmp_path: Path):
         store = PublicationStore(str(tmp_path / "state.sqlite"))
