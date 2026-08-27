@@ -135,6 +135,17 @@ class PublicationStore:
                     publication_id TEXT NOT NULL,
                     publication_version TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS publication_legacy_mappings (
+                    publication_id TEXT NOT NULL,
+                    publication_version TEXT NOT NULL,
+                    legacy_vector_id TEXT NOT NULL,
+                    public_id TEXT NOT NULL,
+                    PRIMARY KEY (publication_id, publication_version, legacy_vector_id)
+                );
+                CREATE TABLE IF NOT EXISTS active_legacy_vector_ids (
+                    legacy_vector_id TEXT PRIMARY KEY,
+                    public_id TEXT NOT NULL
+                );
                 """
             )
 
@@ -153,6 +164,56 @@ class PublicationStore:
             except sqlite3.IntegrityError:
                 return False
         return True
+
+    @staticmethod
+    def _event_body(descriptor: PublicationDescriptor, state: dict[str, Any], event_id: str) -> str:
+        body: dict[str, Any] = {
+            "event_id": event_id,
+            "publication_id": descriptor.publication_id,
+            "publication_version": descriptor.publication_version,
+            "schema_version": descriptor.schema_version,
+            "checksum": descriptor.checksum,
+            "status": state["status"],
+            "occurred_at": state["updated_at"],
+        }
+        for key in ("collection_name", "record_count", "point_count", "error_code", "message"):
+            if state.get(key) is not None:
+                body[key] = state[key]
+        return json.dumps(body, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _insert_event(
+        connection: sqlite3.Connection,
+        descriptor: PublicationDescriptor,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        event_id = str(uuid.uuid4())
+        body = PublicationStore._event_body(descriptor, state, event_id)
+        created_at = datetime.now(UTC).isoformat()
+        connection.execute(
+            """
+            INSERT INTO publication_events (event_id, publication_id, publication_version, body, callback_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                descriptor.publication_id,
+                descriptor.publication_version,
+                body,
+                descriptor.callback_url,
+                created_at,
+            ),
+        )
+        return {
+            "event_id": event_id,
+            "publication_id": descriptor.publication_id,
+            "publication_version": descriptor.publication_version,
+            "body": body,
+            "callback_url": descriptor.callback_url,
+            "delivered_at": None,
+            "attempts": 0,
+            "created_at": created_at,
+        }
 
     def enqueue(self, descriptor: PublicationDescriptor) -> tuple[dict[str, Any], bool]:
         now = datetime.now(UTC).isoformat()
@@ -190,7 +251,14 @@ class PublicationStore:
                     now,
                 ),
             )
-        return self.get(descriptor.publication_id, descriptor.publication_version), False
+            state = dict(
+                connection.execute(
+                    "SELECT * FROM publications WHERE publication_id = ? AND publication_version = ?",
+                    (descriptor.publication_id, descriptor.publication_version),
+                ).fetchone()
+            )
+            self._insert_event(connection, descriptor, state)
+        return state, False
 
     def get(self, publication_id: str, publication_version: str) -> dict[str, Any]:
         with self._connection() as connection:
@@ -226,6 +294,112 @@ class PublicationStore:
                 params,
             )
         return self.get(descriptor.publication_id, descriptor.publication_version)
+
+    def transition_with_event(
+        self,
+        descriptor: PublicationDescriptor,
+        status: str,
+        *,
+        legacy_mappings: dict[str, str] | None = None,
+        **values: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Persist a state transition and its callback outbox row in one transaction."""
+        now = datetime.now(UTC).isoformat()
+        allowed = {
+            "collection_name",
+            "previous_collection_name",
+            "record_count",
+            "point_count",
+            "error_code",
+            "message",
+        }
+        columns = ["status = ?", "updated_at = ?"]
+        params: list[Any] = [status, now]
+        for key, value in values.items():
+            if key not in allowed:
+                raise ValueError(f"Unsupported publication state field: {key}")
+            columns.append(f"{key} = ?")
+            params.append(value)
+        params.extend((descriptor.publication_id, descriptor.publication_version))
+        with self._connection() as connection:
+            connection.execute(
+                f"UPDATE publications SET {', '.join(columns)} WHERE publication_id = ? AND publication_version = ?",
+                params,
+            )
+            if legacy_mappings is not None:
+                connection.execute("DELETE FROM active_legacy_vector_ids")
+                connection.executemany(
+                    """
+                    INSERT OR REPLACE INTO publication_legacy_mappings
+                    (publication_id, publication_version, legacy_vector_id, public_id) VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (descriptor.publication_id, descriptor.publication_version, legacy_id, public_id)
+                        for legacy_id, public_id in legacy_mappings.items()
+                    ],
+                )
+                connection.executemany(
+                    "INSERT INTO active_legacy_vector_ids (legacy_vector_id, public_id) VALUES (?, ?)",
+                    list(legacy_mappings.items()),
+                )
+            row = connection.execute(
+                "SELECT * FROM publications WHERE publication_id = ? AND publication_version = ?",
+                (descriptor.publication_id, descriptor.publication_version),
+            ).fetchone()
+            if row is None:
+                raise PublicationError("PUBLICATION_NOT_FOUND", "Publication was not found", 404)
+            state = dict(row)
+            event = self._insert_event(connection, descriptor, state)
+        return state, event
+
+    def active_public_id(self, legacy_vector_id: str) -> str | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT public_id FROM active_legacy_vector_ids WHERE legacy_vector_id = ?", (legacy_vector_id,)
+            ).fetchone()
+        return str(row["public_id"]) if row else None
+
+    def legacy_mappings(self, descriptor: PublicationDescriptor) -> dict[str, str]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT legacy_vector_id, public_id FROM publication_legacy_mappings
+                WHERE publication_id = ? AND publication_version = ?
+                """,
+                (descriptor.publication_id, descriptor.publication_version),
+            ).fetchall()
+        return {str(row["legacy_vector_id"]): str(row["public_id"]) for row in rows}
+
+    def stage_legacy_mappings(self, descriptor: PublicationDescriptor, mappings: dict[str, str]) -> None:
+        """Save cutover links before the alias operation so a crash cannot lose them."""
+        with self._connection() as connection:
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO publication_legacy_mappings
+                (publication_id, publication_version, legacy_vector_id, public_id) VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (descriptor.publication_id, descriptor.publication_version, legacy_id, public_id)
+                    for legacy_id, public_id in mappings.items()
+                ],
+            )
+
+    def legacy_mappings_for_collection(self, collection_name: str) -> dict[str, str]:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT publication_id, publication_version FROM publications
+                WHERE collection_name = ? ORDER BY updated_at DESC LIMIT 1
+                """,
+                (collection_name,),
+            ).fetchone()
+        if row is None:
+            return {}
+        return self.legacy_mappings(
+            PublicationDescriptor(
+                **json.loads(self.get(row["publication_id"], row["publication_version"])["descriptor_json"])
+            )
+        )
 
     def add_event(self, descriptor: PublicationDescriptor, event_id: str, body: str) -> dict[str, Any]:
         with self._connection() as connection:
@@ -264,12 +438,44 @@ class PublicationStore:
             rows = connection.execute("SELECT * FROM publication_events WHERE delivered_at IS NULL").fetchall()
         return [dict(row) for row in rows]
 
+    def latest_event(self, descriptor: PublicationDescriptor, status: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM publication_events
+                WHERE publication_id = ? AND publication_version = ? AND body LIKE ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (descriptor.publication_id, descriptor.publication_version, f'%"status":"{status}"%'),
+            ).fetchone()
+        return dict(row) if row else None
+
     def incomplete_descriptors(self) -> list[PublicationDescriptor]:
         with self._connection() as connection:
             rows = connection.execute(
                 "SELECT descriptor_json FROM publications WHERE status IN (?, ?)", (QUEUED, BUILDING)
             ).fetchall()
         return [PublicationDescriptor(**json.loads(row["descriptor_json"])) for row in rows]
+
+    def terminal_states_without_events(self) -> list[tuple[PublicationDescriptor, dict[str, Any]]]:
+        """Find legacy/crash-interrupted terminal rows that need an outbox event."""
+        terminal_states = (SUCCEEDED, FAILED, ROLLED_BACK)
+        placeholders = ", ".join("?" for _ in terminal_states)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT p.* FROM publications p
+                WHERE p.status IN ({placeholders})
+                  AND NOT EXISTS (
+                    SELECT 1 FROM publication_events e
+                    WHERE e.publication_id = p.publication_id
+                      AND e.publication_version = p.publication_version
+                      AND e.body LIKE '%"status":"' || p.status || '"%'
+                  )
+                """,
+                terminal_states,
+            ).fetchall()
+        return [(PublicationDescriptor(**json.loads(row["descriptor_json"])), dict(row)) for row in rows]
 
     def acquire_build_lock(self, descriptor: PublicationDescriptor) -> bool:
         """Acquire the cross-process lock that serializes all alias changes."""
@@ -389,27 +595,17 @@ class PublicationService:
         self.max_request_bytes = PUBLICATION_MAX_REQUEST_BYTES
         self.max_upload_bytes = PUBLICATION_MAX_UPLOAD_BYTES
 
-    def _callback_body(self, state: dict[str, Any]) -> tuple[str, str]:
-        descriptor = PublicationDescriptor(**json.loads(state["descriptor_json"]))
-        event_id = str(uuid.uuid4())
-        body = {
-            "event_id": event_id,
-            "publication_id": descriptor.publication_id,
-            "publication_version": descriptor.publication_version,
-            "schema_version": descriptor.schema_version,
-            "checksum": descriptor.checksum,
-            "status": state["status"],
-            "occurred_at": state["updated_at"],
-        }
-        for key in ("collection_name", "record_count", "point_count", "error_code", "message"):
-            if state.get(key) is not None:
-                body[key] = state[key]
-        return event_id, json.dumps(body, sort_keys=True, separators=(",", ":"))
-
     def report(self, descriptor: PublicationDescriptor, state: dict[str, Any]) -> None:
-        event_id, body = self._callback_body(state)
-        event = self.store.add_event(descriptor, event_id, body)
+        """Deliver the durable outbox event for a just-persisted transition."""
+        event = self.store.latest_event(descriptor, state["status"])
+        if event is not None:
+            self.deliver_event(event)
+
+    def _transition(self, descriptor: PublicationDescriptor, status: str, **values: Any) -> dict[str, Any]:
+        legacy_mappings = values.pop("legacy_mappings", None)
+        state, event = self.store.transition_with_event(descriptor, status, legacy_mappings=legacy_mappings, **values)
         self.deliver_event(event)
+        return state
 
     def deliver_event(self, event: dict[str, Any]) -> None:
         if not PUBLICATION_CALLBACK_SECRET:
@@ -482,18 +678,22 @@ class PublicationService:
     def _collection_name(self, descriptor: PublicationDescriptor) -> str:
         return f"{COLLECTION_NAME}__publication__{descriptor.publication_id.replace('-', '')[:16]}__{descriptor.checksum[:12]}"
 
-    def _upload_records(self, path: Path, collection_name: str, old_ids: dict[int, tuple[str, str]]) -> tuple[int, str]:
+    def _upload_records(
+        self, path: Path, collection_name: str, old_ids: dict[int, tuple[str, str]]
+    ) -> tuple[int, str, dict[str, str]]:
         point_count = 0
         batch: list[tuple[str, str, dict[str, Any]]] = []
         batch_bytes = 0
         validation_text = ""
+        legacy_mappings: dict[str, str] = {}
         for record in iter_records(path):
             text = searchable_text(record)
             # A matching title makes the legacy Django ID a conservative cutover match.
             old_id = old_ids.get(record["id"])
-            point_id = old_id[0] if old_id and old_id[1] == record["title"] else record["public_id"]
+            if old_id and old_id[1] == record["title"]:
+                legacy_mappings[old_id[0]] = record["public_id"]
             item = (
-                point_id,
+                record["public_id"],
                 text,
                 {"title": record["title"], "doc_type": "ire_resource", "metadata": resource_metadata(record)},
             )
@@ -513,7 +713,7 @@ class PublicationService:
                 batch.clear()
         if batch:
             point_count += self._upload_batch(collection_name, batch)
-        return point_count, validation_text
+        return point_count, validation_text, legacy_mappings
 
     def _upload_batch(self, collection_name: str, batch: list[tuple[str, str, dict[str, Any]]]) -> int:
         texts = [item[1] for item in batch]
@@ -549,30 +749,47 @@ class PublicationService:
         aliases = self.qdrant_client.get_aliases().aliases
         return next((alias.collection_name for alias in aliases if alias.alias_name == SERVING_COLLECTION_ALIAS), None)
 
+    def _delete_if_not_serving(self, collection_name: str | None) -> None:
+        if collection_name and self._current_alias_target() != collection_name:
+            self.qdrant_client.delete_collection(collection_name)
+
+    def _prune_collections(self, live_collection: str, rollback_collection: str | None) -> None:
+        """Keep only the serving collection and the one alias rollback target."""
+        protected = {live_collection}
+        if rollback_collection:
+            protected.add(rollback_collection)
+        collections = self.qdrant_client.get_collections().collections
+        prefix = f"{COLLECTION_NAME}__publication__"
+        for collection in collections:
+            name = collection.name
+            if name.startswith(prefix) and name not in protected and self._current_alias_target() != name:
+                self.qdrant_client.delete_collection(name)
+
     def run(self, descriptor: PublicationDescriptor) -> None:
         while not self.store.acquire_build_lock(descriptor):
             # Keep later work queued until the current build completes. The lock
             # is durable, so separate API workers cannot race alias changes.
             time.sleep(1)
-        state = self.store.update(descriptor, BUILDING)
-        self.report(descriptor, state)
+        state = self._transition(descriptor, BUILDING)
         path: Path | None = None
+        collection_name: str | None = None
+        alias_switched = False
         try:
             collection_name = self._collection_name(descriptor)
             # Never recreate a collection that became live before a process stopped.
             if self._current_alias_target() == collection_name:
                 info = self.qdrant_client.get_collection(collection_name)
                 clear_publication_caches()
-                state = self.store.update(
+                state = self._transition(
                     descriptor,
                     SUCCEEDED,
+                    legacy_mappings=self.store.legacy_mappings(descriptor),
                     collection_name=collection_name,
                     record_count=info.points_count,
                     point_count=info.points_count,
                     error_code=None,
                     message="Publication is serving through the Qdrant alias",
                 )
-                self.report(descriptor, state)
                 return
             path = self._download(descriptor)
             metadata = validate_snapshot(path)
@@ -590,7 +807,9 @@ class PublicationService:
                 previous_collection_name=previous,
             )
             create_hybrid_collection(self.qdrant_client, collection_name, VECTOR_SIZE, recreate=True)
-            point_count, validation_text = self._upload_records(path, collection_name, self._legacy_id_map())
+            point_count, validation_text, legacy_mappings = self._upload_records(
+                path, collection_name, self._legacy_id_map()
+            )
             if point_count != metadata["record_count"]:
                 raise PublicationError(
                     "POINT_COUNT_MISMATCH", "Built point count does not match the snapshot record count", 422
@@ -610,11 +829,14 @@ class PublicationService:
                     raise PublicationError(
                         "SEARCH_VALIDATION_FAILED", "New collection failed representative search validation", 422
                     )
+            self.store.stage_legacy_mappings(descriptor, legacy_mappings)
             self._switch_alias(collection_name)
+            alias_switched = True
             clear_publication_caches()
-            state = self.store.update(
+            state = self._transition(
                 descriptor,
                 SUCCEEDED,
+                legacy_mappings=legacy_mappings,
                 collection_name=collection_name,
                 previous_collection_name=previous,
                 record_count=metadata["record_count"],
@@ -622,11 +844,22 @@ class PublicationService:
                 error_code=None,
                 message="Publication is serving through the Qdrant alias",
             )
-            self.report(descriptor, state)
+            try:
+                self._prune_collections(collection_name, previous)
+            except Exception:
+                logger.exception("publication_collection_prune_failed", collection_name=collection_name)
         except Exception as exc:  # Errors are recorded and reported without changing the serving alias.
+            if alias_switched:
+                # Qdrant and SQLite cannot share one transaction. The staged
+                # mapping lets restart recovery finish this already-live cutover.
+                logger.exception("publication_post_alias_recovery_required", collection_name=collection_name)
+                return
             code, message = _safe_message(exc)
-            state = self.store.update(descriptor, FAILED, error_code=code, message=message)
-            self.report(descriptor, state)
+            self._transition(descriptor, FAILED, error_code=code, message=message)
+            try:
+                self._delete_if_not_serving(collection_name)
+            except Exception:
+                logger.exception("publication_failed_collection_cleanup_failed", collection_name=collection_name)
         finally:
             if path is not None:
                 path.unlink(missing_ok=True)
@@ -655,27 +888,39 @@ class PublicationService:
         return path
 
     def rollback(self, descriptor: PublicationDescriptor) -> dict[str, Any]:
-        state = self.store.get(descriptor.publication_id, descriptor.publication_version)
-        if state["status"] != SUCCEEDED or not state["previous_collection_name"]:
-            raise PublicationError("ROLLBACK_UNAVAILABLE", "This publication has no retained prior collection", 409)
-        if self._current_alias_target() != state["collection_name"]:
-            raise PublicationError(
-                "ROLLBACK_NOT_CURRENT",
-                "Only the publication currently serving through the alias can be rolled back",
-                409,
+        while not self.store.acquire_build_lock(descriptor):
+            time.sleep(1)
+        try:
+            state = self.store.get(descriptor.publication_id, descriptor.publication_version)
+            if state["status"] != SUCCEEDED or not state["previous_collection_name"]:
+                raise PublicationError("ROLLBACK_UNAVAILABLE", "This publication has no retained prior collection", 409)
+            if self._current_alias_target() != state["collection_name"]:
+                raise PublicationError(
+                    "ROLLBACK_NOT_CURRENT",
+                    "Only the publication currently serving through the alias can be rolled back",
+                    409,
+                )
+            target = state["previous_collection_name"]
+            self._switch_alias(target)
+            clear_publication_caches()
+            state = self._transition(
+                descriptor,
+                ROLLED_BACK,
+                legacy_mappings=self.store.legacy_mappings_for_collection(target),
+                message="Serving alias restored to the retained prior collection",
             )
-        self._switch_alias(state["previous_collection_name"])
-        clear_publication_caches()
-        state = self.store.update(
-            descriptor, ROLLED_BACK, message="Serving alias restored to the retained prior collection"
-        )
-        self.report(descriptor, state)
-        return state
+            self._prune_collections(target, state["collection_name"])
+            return state
+        finally:
+            self.store.release_build_lock(descriptor)
 
     def recover(self) -> None:
         """Resume interrupted builds and retry callbacks after a process restart."""
         self.store.reset_build_locks()
         for event in self.store.outstanding_events():
+            self.deliver_event(event)
+        for descriptor, state in self.store.terminal_states_without_events():
+            _, event = self.store.transition_with_event(descriptor, state["status"])
             self.deliver_event(event)
         for descriptor in self.store.incomplete_descriptors():
             self.run(descriptor)

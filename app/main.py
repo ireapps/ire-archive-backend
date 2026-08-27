@@ -48,7 +48,13 @@ from app.config import (
     VECTOR_SIZE,
     get_serving_collection_name,
 )
-from app.dependencies import get_embedding_model, get_qdrant_client, get_sparse_model, lifespan
+from app.dependencies import (
+    get_embedding_model,
+    get_qdrant_client,
+    get_sparse_model,
+    lifespan,
+    resolve_legacy_vector_id,
+)
 from app.exceptions import APIError, ResourceNotFoundError
 from app.models import ErrorResponse, SearchQuery, SearchResponse, SimilarResource, SimilarResourcesResponse
 from app.rate_limit import RateLimitBypassMiddleware, limit_with_bypass, limiter, rate_limit_exceeded_handler
@@ -586,7 +592,8 @@ async def clear_cache(request: Request, response: Response):
 async def get_resource(
     request: Request, response: Response, vector_id: str, session: Session = Depends(require_member)
 ):
-    """Get a single resource by vector_id (MD5 hash generated from chunk text) - cached for 24 hours - requires active membership"""
+    """Get a single resource by its permanent vector ID or a mapped legacy deep link."""
+    vector_id = resolve_legacy_vector_id(vector_id)
     logger.info("resource_request", vector_id=vector_id, user_id=session.user_id)
 
     # Generate cache key
@@ -620,7 +627,7 @@ async def get_resource(
     metadata = payload.get("metadata", {})
 
     resource_data = {
-        "vector_id": vector_id,  # Use vector_id (the MD5 hash)
+        "vector_id": str(record.id),
         "title": payload.get("title", ""),
         "text": payload.get("text", ""),
         "doc_type": payload.get("doc_type", ""),
@@ -742,6 +749,7 @@ async def get_similar_resources_endpoint(
     request: Request, response: Response, vector_id: str, session: Session = Depends(require_member)
 ):
     """Get similar resources based on vector similarity - cached for 24 hours - requires active membership"""
+    vector_id = resolve_legacy_vector_id(vector_id)
     logger.info("similar_resources_request", vector_id=vector_id, user_id=session.user_id)
 
     # Generate cache key

@@ -71,10 +71,10 @@ The API reads `SERVING_COLLECTION_ALIAS`, not a physical collection. On first st
 existing `COLLECTION_NAME`, so existing callers see no change. A publication writes a distinct, named collection and
 changes the alias only after the snapshot, point count, and representative query validate.
 
-For the one-time cutover, a v2 record retains an existing vector ID only when exactly one point in the current alias
-has the same legacy Django `metadata.id` **and** title. This deliberately conservative match keeps known resource URLs
-working. All other records use their permanent v2 `public_id` as their Qdrant point ID and API `vector_id`. The
-transitional Django ID never determines a new identity.
+Every v2 record uses its permanent `public_id` as its Qdrant point ID and API `vector_id`, including records that
+confidently match an existing point by legacy Django `metadata.id` and title. For those conservative matches, the
+backend durably records a legacy-vector-ID-to-`public_id` lookup only when the alias changes. This keeps old deep links
+working without allowing a transitional ID to become a new collection's identity.
 
 ## Tracking
 

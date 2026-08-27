@@ -128,6 +128,36 @@ class TestStreamingSnapshotValidation:
 
         assert validate_snapshot(_write_snapshot(tmp_path, snapshot))["record_count"] == 1
 
+    def test_rejects_oversized_single_transcript(self, tmp_path: Path, monkeypatch):
+        import app.publication_contract as publication_contract
+
+        monkeypatch.setattr(publication_contract, "MAX_EXTRACTED_TEXT_CHARS", 10)
+        snapshot = _snapshot([_record(extracted_text="x" * 11)])
+
+        with pytest.raises(SnapshotValidationError, match="character limit"):
+            validate_snapshot(_write_snapshot(tmp_path, snapshot))
+
+    def test_rejects_oversized_single_record_before_ijson_parse(self, tmp_path: Path, monkeypatch):
+        import app.publication_contract as publication_contract
+
+        monkeypatch.setattr(publication_contract, "MAX_RECORD_BYTES", 100)
+        snapshot = _snapshot([_record(extracted_text="x" * 200)])
+
+        with pytest.raises(SnapshotValidationError, match="byte limit"):
+            validate_snapshot(_write_snapshot(tmp_path, snapshot))
+
+    def test_rejects_duplicate_public_and_download_ids(self, tmp_path: Path):
+        first = _record(1)
+        duplicate_public = _record(2)
+        duplicate_public["public_id"] = first["public_id"]
+        with pytest.raises(SnapshotValidationError, match="unique"):
+            validate_snapshot(_write_snapshot(tmp_path, _snapshot([first, duplicate_public])))
+
+        duplicate_download = _record(2)
+        duplicate_download["downloads"][0]["id"] = first["downloads"][0]["id"]
+        with pytest.raises(SnapshotValidationError, match="unique"):
+            validate_snapshot(_write_snapshot(tmp_path, _snapshot([first, duplicate_download])))
+
 
 class TestPublicationAuthenticationAndState:
     def test_signature_uses_exact_body_and_nonce_cannot_replay(self, tmp_path: Path, monkeypatch):
@@ -180,6 +210,8 @@ class _FakeQdrant:
         self.alias_operations: list[object] = []
         self.last_points: list[Any] = []
         self.upload_batches = 0
+        self.deleted: list[str] = []
+        self.collection_names = ["legacy"]
 
     def get_aliases(self):
         return SimpleNamespace(aliases=self.aliases)
@@ -203,11 +235,15 @@ class _FakeQdrant:
         create = change_aliases_operations[-1].create_alias
         self.aliases = [SimpleNamespace(alias_name=create.alias_name, collection_name=create.collection_name)]
 
+    def delete_collection(self, collection_name):
+        self.deleted.append(collection_name)
+
+    def get_collections(self):
+        return SimpleNamespace(collections=[SimpleNamespace(name=name) for name in self.collection_names])
+
 
 class TestCollectionPublication:
-    def test_success_switches_alias_only_after_build_and_preserves_confident_legacy_id(
-        self, tmp_path: Path, monkeypatch
-    ):
+    def test_success_switches_alias_only_after_build_and_maps_confident_legacy_id(self, tmp_path: Path, monkeypatch):
         import app.publication_service as publication_service
 
         snapshot = _snapshot([_record()])
@@ -237,7 +273,8 @@ class TestCollectionPublication:
         assert qdrant.aliases[0].collection_name == state["collection_name"]
         assert qdrant.alias_operations
         assert qdrant.points_count == 1
-        assert qdrant.last_points[0].id == "old-resource-id"
+        assert qdrant.last_points[0].id == snapshot["records"][0]["public_id"]
+        assert store.active_public_id("old-resource-id") == snapshot["records"][0]["public_id"]
 
         qdrant.aliases = [SimpleNamespace(alias_name="nonprofit_knowledge_live", collection_name="newer-publication")]
         with pytest.raises(PublicationError, match="currently serving"):
@@ -292,6 +329,53 @@ class TestCollectionPublication:
 
         assert store.get(descriptor.publication_id, descriptor.publication_version)["status"] == FAILED
         assert qdrant.aliases[0].collection_name == "legacy"
+        assert qdrant.deleted
+
+    def test_terminal_transition_persists_outbox_in_same_commit(self, tmp_path: Path):
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        descriptor = _descriptor()
+        store.enqueue(descriptor)
+
+        state, event = store.transition_with_event(descriptor, SUCCEEDED, collection_name="published")
+
+        assert state["status"] == SUCCEEDED
+        restarted_store = PublicationStore(str(tmp_path / "state.sqlite"))
+        assert event["event_id"] in {item["event_id"] for item in restarted_store.outstanding_events()}
+
+    def test_recovery_finds_legacy_terminal_state_without_callback(self, tmp_path: Path):
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        descriptor = _descriptor()
+        store.enqueue(descriptor)
+        store.update(descriptor, FAILED, error_code="TEST", message="interrupted before callback")
+
+        missing = store.terminal_states_without_events()
+
+        assert [(item.publication_id, state["status"]) for item, state in missing] == [
+            (descriptor.publication_id, FAILED)
+        ]
+
+    def test_prune_retains_live_and_one_rollback_collection(self, tmp_path: Path):
+        qdrant = _FakeQdrant()
+        qdrant.aliases = [SimpleNamespace(alias_name="nonprofit_knowledge_live", collection_name="new")]
+        qdrant.collection_names = ["legacy", "new", "nonprofit_knowledge__publication__obsolete"]
+        service = PublicationService(
+            PublicationStore(str(tmp_path / "state.sqlite")),
+            cast(Any, qdrant),
+            cast(Any, SimpleNamespace()),
+            cast(Any, None),
+        )
+
+        service._prune_collections("new", "legacy")
+
+        assert qdrant.deleted == ["nonprofit_knowledge__publication__obsolete"]
+
+    def test_rollback_serializes_with_build_lock(self, tmp_path: Path):
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        descriptor = _descriptor()
+        store.enqueue(descriptor)
+        assert store.acquire_build_lock(descriptor)
+        assert not store.acquire_build_lock(_descriptor())
+        store.release_build_lock(descriptor)
 
     def test_rejects_path_traversal_in_allowlisted_url(self):
         assert not _is_allowed_https_url(

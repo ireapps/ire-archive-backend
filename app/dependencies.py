@@ -252,3 +252,10 @@ def get_publication_service() -> Any:
         get_embedding_model(),
         get_sparse_model(),
     )
+
+
+def resolve_legacy_vector_id(vector_id: str) -> str:
+    """Resolve a pre-v2 deep link to the permanent public point ID, when mapped."""
+    if app_state.publication_store is None:
+        return vector_id
+    return app_state.publication_store.active_public_id(vector_id) or vector_id

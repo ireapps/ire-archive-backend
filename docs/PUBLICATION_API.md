@@ -55,11 +55,15 @@ deduplicate event IDs and tolerate delayed duplicate/out-of-order events. Legal 
 
 The backend streams the snapshot to temporary storage, validates the strict v2 envelope, checksums, IDs, ordering,
 and counts with a streaming parser, then builds a fresh Qdrant collection. It retains one record and bounded embedding
-batches at a time. Extracted download text and transcripts are included in searchable text with a 50,000-character
-per-resource cap. The public download metadata keeps its ID, order, URL, name, file, and size; extraction-only text
-is not returned to browsers.
+batches at a time. Before `ijson` reads any record, the raw stream rejects a record over 2,000,000 bytes; the
+validated canonical record is also limited to 2,000,000 bytes. Each `extracted_text` is limited to 1,000,000
+characters, and at most 50,000 extracted-text characters contribute to one resource's searchable content. These
+limits bound parser materialization and must be enforced by the producer too. The public download metadata keeps its
+ID, order, URL, name, file, and size; extraction-only text is not returned to browsers.
 
 After exact point-count and representative-query validation, one Qdrant alias update moves
 `SERVING_COLLECTION_ALIAS` to the new collection. Failure never moves the alias. The prior target remains for
 `POST /internal/publications/{publication_id}/{publication_version}/rollback`, which authenticates an empty signed
-body and moves only the alias - no download or re-embedding.
+body and moves only the alias - no download or re-embedding. Every new point ID is the permanent resource
+`public_id`; a durable, active legacy-vector-ID lookup resolves only confidently matched old resource links. Failed
+build collections are removed, and successful cutovers retain only the live collection and one rollback target.

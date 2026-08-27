@@ -13,6 +13,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 
 import ijson
+from app.config import PUBLICATION_MAX_EXTRACTED_TEXT_CHARS, PUBLICATION_MAX_RECORD_BYTES
 
 SCHEMA_VERSION = "2.0"
 ALLOWED_CATEGORIES = frozenset({"audio", "contest entry", "dataset", "journal", "tipsheet", "webinar"})
@@ -47,10 +48,73 @@ CONTEST_ENTRY_KEYS = frozenset({"contest_year", "category", "size_group", "resul
 DOWNLOAD_KEYS = frozenset(
     {"id", "file", "url", "name", "filesize", "sort_order", "extracted_text", "extracted_text_source"}
 )
+MAX_RECORD_BYTES = PUBLICATION_MAX_RECORD_BYTES
+MAX_EXTRACTED_TEXT_CHARS = PUBLICATION_MAX_EXTRACTED_TEXT_CHARS
 
 
 class SnapshotValidationError(ValueError):
     """Raised when a snapshot does not meet the only supported export contract."""
+
+
+def enforce_stream_limits(
+    path: Path,
+    *,
+    max_record_bytes: int = MAX_RECORD_BYTES,
+) -> None:
+    """Reject oversized records before ijson materializes their string values."""
+    in_string = False
+    escaped = False
+    token = bytearray()
+    last_key: str | None = None
+    current_key: str | None = None
+    records_array = False
+    record_depth = 0
+    record_bytes = 0
+
+    with path.open("rb") as source:
+        while chunk := source.read(64 * 1024):
+            for byte in chunk:
+                if record_depth:
+                    record_bytes += 1
+                    if record_bytes > max_record_bytes:
+                        raise SnapshotValidationError("Snapshot record exceeds the configured byte limit")
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif byte == 92:
+                        escaped = True
+                    elif byte == 34:
+                        in_string = False
+                        try:
+                            last_key = token.decode("utf-8")
+                        except UnicodeDecodeError:
+                            last_key = None
+                    elif len(token) < 128:
+                        token.append(byte)
+                    continue
+                if byte == 34:
+                    in_string = True
+                    escaped = False
+                    token.clear()
+                    continue
+                if byte in b" \t\r\n":
+                    continue
+                if byte == 58:
+                    current_key = last_key
+                    last_key = None
+                elif current_key == "records" and byte == 91:
+                    records_array = True
+                    current_key = None
+                elif records_array and byte == 123:
+                    record_depth += 1
+                    if record_depth == 1:
+                        record_bytes = 1
+                elif record_depth and byte == 123:
+                    record_depth += 1
+                elif record_depth and byte == 125:
+                    record_depth -= 1
+                    if record_depth == 0:
+                        current_key = None
 
 
 def _is_int(value: Any) -> bool:
@@ -174,6 +238,8 @@ def _validate_downloads(values: Any, path: str, errors: list[str], seen_download
         if not isinstance(sort_order, int) or isinstance(sort_order, bool) or cast(int, sort_order) < 0:
             errors.append(f"{item_path}.sort_order: expected a non-negative integer")
         text, source = value.get("extracted_text"), value.get("extracted_text_source")
+        if isinstance(text, str) and len(text) > MAX_EXTRACTED_TEXT_CHARS:
+            errors.append(f"{item_path}.extracted_text: exceeds the configured character limit")
         if isinstance(text, str) and text:
             if source not in EXTRACTED_TEXT_SOURCES:
                 errors.append(f"{item_path}.extracted_text_source: unsupported or missing source")
@@ -287,6 +353,7 @@ def iter_records(path: Path) -> Iterator[dict[str, Any]]:
 
 def validate_snapshot(path: Path) -> dict[str, Any]:
     """Stream every record and verify envelope, checksum, count, and ordering."""
+    enforce_stream_limits(path)
     metadata, errors = _read_envelope(path)
     if errors:
         raise SnapshotValidationError("; ".join(errors))
@@ -297,6 +364,12 @@ def validate_snapshot(path: Path) -> dict[str, Any]:
     download_ids: set[str] = set()
     count = 0
     for record in iter_records(path):
+        canonical_record = {key: value for key, value in record.items() if key != "id"}
+        canonical_bytes = len(
+            json.dumps(canonical_record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        if canonical_bytes > MAX_RECORD_BYTES:
+            raise SnapshotValidationError("Snapshot record exceeds the configured canonical byte limit")
         record_errors = validate_record(record, count, download_ids)
         if record_errors:
             raise SnapshotValidationError("; ".join(record_errors))
@@ -307,7 +380,7 @@ def validate_snapshot(path: Path) -> dict[str, Any]:
             raise SnapshotValidationError("Snapshot.records: records must be ordered by public_id")
         public_ids.add(public_id)
         previous_id = public_id
-        stable_record = {key: value for key, value in record.items() if key != "id"}
+        stable_record = canonical_record
         if count:
             digest.update(b",")
         digest.update(
