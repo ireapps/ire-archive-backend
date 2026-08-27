@@ -128,14 +128,26 @@ class TestStreamingSnapshotValidation:
 
         assert validate_snapshot(_write_snapshot(tmp_path, snapshot))["record_count"] == 1
 
-    def test_rejects_oversized_single_transcript(self, tmp_path: Path, monkeypatch):
+    def test_rejects_extracted_text_at_configured_boundary(self, tmp_path: Path, monkeypatch):
         import app.publication_contract as publication_contract
 
-        monkeypatch.setattr(publication_contract, "MAX_EXTRACTED_TEXT_CHARS", 10)
-        snapshot = _snapshot([_record(extracted_text="x" * 11)])
+        monkeypatch.setattr(publication_contract, "MAX_EXTRACTED_TEXT_CHARS", 5_000_000)
+        snapshot = _snapshot([_record(extracted_text="x" * 5_000_001)])
 
         with pytest.raises(SnapshotValidationError, match="character limit"):
             validate_snapshot(_write_snapshot(tmp_path, snapshot))
+
+    def test_accepts_extracted_text_at_configured_boundary(self, tmp_path: Path, monkeypatch):
+        import app.publication_contract as publication_contract
+
+        monkeypatch.setattr(publication_contract, "MAX_EXTRACTED_TEXT_CHARS", 5_000_000)
+
+        assert (
+            validate_snapshot(_write_snapshot(tmp_path, _snapshot([_record(extracted_text="x" * 5_000_000)])))[
+                "record_count"
+            ]
+            == 1
+        )
 
     def test_rejects_oversized_single_record_before_ijson_parse(self, tmp_path: Path, monkeypatch):
         import app.publication_contract as publication_contract

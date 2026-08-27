@@ -55,8 +55,8 @@ deduplicate event IDs and tolerate delayed duplicate/out-of-order events. Legal 
 
 The backend streams the snapshot to temporary storage, validates the strict v2 envelope, checksums, IDs, ordering,
 and counts with a streaming parser, then builds a fresh Qdrant collection. It retains one record and bounded embedding
-batches at a time. Before `ijson` reads any record, the raw stream rejects a record over 2,000,000 bytes; the
-validated canonical record is also limited to 2,000,000 bytes. Each `extracted_text` is limited to 1,000,000
+batches at a time. Before `ijson` reads any record, the raw stream rejects a record over 20,000,000 bytes; the
+validated canonical record is also limited to 20,000,000 bytes. Each `extracted_text` is limited to 5,000,000
 characters, and at most 50,000 extracted-text characters contribute to one resource's searchable content. These
 limits bound parser materialization and must be enforced by the producer too. The public download metadata keeps its
 ID, order, URL, name, file, and size; extraction-only text is not returned to browsers.
