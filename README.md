@@ -161,6 +161,26 @@ These are legacy operator commands, not the target publication workflow. `--no-c
 recreation; it is not incremental synchronization and does not remove omitted or withdrawn records. Approved
 snapshot publication uses [docs/PUBLICATION_API.md](docs/PUBLICATION_API.md), separately from code deployment.
 
+### Fly.io (Staff acceptance)
+
+`fly.acceptance.toml` is a separate, manual configuration for the private staff-acceptance backend. It names only
+`ire-archive-acceptance-search` in `ord`, runs its own loopback-only Qdrant service, and mounts the separate
+`qdrant_acceptance_data` volume. It deliberately contains no publication, legacy data URL, Redis, MemberSuite, or
+production-domain settings.
+
+Deploy only a reviewed merged-main commit that contains this configuration and the protected-publication release,
+after the acceptance app and its volume have been created:
+
+```bash
+git merge-base --is-ancestor 2cf588567e80b85414025b20d52d2ef515f4a143 HEAD
+git rev-parse HEAD  # Record the resulting exact reviewed main revision before deployment.
+fly deploy --config fly.acceptance.toml --app ire-archive-acceptance-search --remote-only
+```
+
+Do not use `make prod-*`, the production deployment workflows, or the production reindex workflow for staff
+acceptance. A code deploy does not publish data; publication remains disabled until its separate secrets and HTTPS
+allowlists are deliberately configured.
+
 ### Environment Variables
 
 See [.env.example](.env.example) for all configuration options. Key variables:
