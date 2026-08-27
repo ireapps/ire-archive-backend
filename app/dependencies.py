@@ -259,3 +259,10 @@ def resolve_legacy_vector_id(vector_id: str) -> str:
     if app_state.publication_store is None:
         return vector_id
     return app_state.publication_store.active_public_id(vector_id) or vector_id
+
+
+def get_serving_generation() -> int:
+    """Read the durable generation that scopes all cached serving results."""
+    if app_state.publication_store is None:
+        return 0
+    return app_state.publication_store.serving_generation()

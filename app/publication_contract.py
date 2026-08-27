@@ -60,42 +60,62 @@ def enforce_stream_limits(
     path: Path,
     *,
     max_record_bytes: int = MAX_RECORD_BYTES,
+    max_extracted_text_bytes: int = MAX_RECORD_BYTES,
 ) -> None:
-    """Reject oversized records before ijson materializes their string values."""
+    """Bound every records-array item before ijson materializes it."""
     in_string = False
     escaped = False
     token = bytearray()
     last_key: str | None = None
     current_key: str | None = None
     records_array = False
-    record_depth = 0
-    record_bytes = 0
+    item_started = False
+    item_is_container = False
+    item_depth = 0
+    item_bytes = 0
+    extracted_text_bytes = 0
+    extracting_text = False
 
     with path.open("rb") as source:
         while chunk := source.read(64 * 1024):
             for byte in chunk:
-                if record_depth:
-                    record_bytes += 1
-                    if record_bytes > max_record_bytes:
-                        raise SnapshotValidationError("Snapshot record exceeds the configured byte limit")
+                if records_array and item_started:
+                    item_bytes += 1
+                    if item_bytes > max_record_bytes:
+                        raise SnapshotValidationError("Snapshot records item exceeds the configured byte limit")
                 if in_string:
+                    if extracting_text:
+                        extracted_text_bytes += 1
+                        if extracted_text_bytes > max_extracted_text_bytes:
+                            raise SnapshotValidationError("Download extracted_text exceeds the configured byte limit")
                     if escaped:
                         escaped = False
                     elif byte == 92:
                         escaped = True
                     elif byte == 34:
                         in_string = False
+                        was_extracting_text = extracting_text
+                        extracting_text = False
                         try:
                             last_key = token.decode("utf-8")
                         except UnicodeDecodeError:
                             last_key = None
+                        if was_extracting_text:
+                            current_key = None
                     elif len(token) < 128:
                         token.append(byte)
                     continue
                 if byte == 34:
+                    if records_array and not item_started:
+                        item_started = True
+                        item_is_container = False
+                        item_bytes = 1
                     in_string = True
                     escaped = False
                     token.clear()
+                    if records_array and item_started and current_key == "extracted_text":
+                        extracting_text = True
+                        extracted_text_bytes = 0
                     continue
                 if byte in b" \t\r\n":
                     continue
@@ -105,16 +125,24 @@ def enforce_stream_limits(
                 elif current_key == "records" and byte == 91:
                     records_array = True
                     current_key = None
-                elif records_array and byte == 123:
-                    record_depth += 1
-                    if record_depth == 1:
-                        record_bytes = 1
-                elif record_depth and byte == 123:
-                    record_depth += 1
-                elif record_depth and byte == 125:
-                    record_depth -= 1
-                    if record_depth == 0:
-                        current_key = None
+                elif records_array and not item_started and byte not in {44, 93}:
+                    item_started = True
+                    item_bytes = 1
+                    item_is_container = byte in {91, 123}
+                    item_depth = 1 if item_is_container else 0
+                elif records_array and item_started and item_is_container:
+                    if byte in {91, 123}:
+                        item_depth += 1
+                    elif byte in {93, 125}:
+                        item_depth -= 1
+                        if item_depth == 0:
+                            item_started = False
+                            current_key = None
+                elif records_array and item_started and byte in {44, 93}:
+                    item_started = False
+                    current_key = None
+                if records_array and not item_started and byte == 93:
+                    records_array = False
 
 
 def _is_int(value: Any) -> bool:

@@ -14,8 +14,14 @@ from typing import Any, cast
 import pytest
 
 from app.dependencies import get_publication_service
+from app.services.cache_service import get_cache_key
 from app.main import app
-from app.publication_contract import SnapshotValidationError, searchable_text, validate_snapshot
+from app.publication_contract import (
+    SnapshotValidationError,
+    enforce_stream_limits,
+    searchable_text,
+    validate_snapshot,
+)
 from app.publication_service import (
     FAILED,
     QUEUED,
@@ -157,6 +163,19 @@ class TestStreamingSnapshotValidation:
 
         with pytest.raises(SnapshotValidationError, match="byte limit"):
             validate_snapshot(_write_snapshot(tmp_path, snapshot))
+
+    def test_preparser_rejects_oversized_extracted_text_and_scalar_item(self, tmp_path: Path):
+        extracted = _write_snapshot(tmp_path, _snapshot([_record(extracted_text="x" * 200)]))
+        with pytest.raises(SnapshotValidationError, match="Download extracted_text"):
+            enforce_stream_limits(extracted, max_record_bytes=1_000, max_extracted_text_bytes=100)
+
+        scalar = tmp_path / "scalar.json"
+        scalar.write_text(
+            '{"schema_version":"2.0","records":["' + "x" * 200 + '"]}',
+            encoding="utf-8",
+        )
+        with pytest.raises(SnapshotValidationError, match="records item"):
+            enforce_stream_limits(scalar, max_record_bytes=100)
 
     def test_rejects_duplicate_public_and_download_ids(self, tmp_path: Path):
         first = _record(1)
@@ -366,6 +385,55 @@ class TestCollectionPublication:
             (descriptor.publication_id, FAILED)
         ]
 
+    def test_carries_legacy_mapping_forward_and_prunes_withdrawn_target(self, tmp_path: Path):
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        first = _descriptor()
+        second = PublicationDescriptor(
+            **{
+                **first.__dict__,
+                "publication_id": "7f5db2b1-4f4f-4f5d-8b2e-3dcce9fd44d3",
+                "publication_version": "2026.08.26.2",
+            }
+        )
+        store.enqueue(first)
+        store.transition_with_event(first, SUCCEEDED, legacy_mappings={"old-md5": "public-one"})
+        store.enqueue(second)
+
+        carried = {
+            legacy_id: public_id
+            for legacy_id, public_id in store.active_legacy_mappings().items()
+            if public_id in {"public-one", "public-two"}
+        }
+        store.transition_with_event(second, SUCCEEDED, legacy_mappings=carried)
+        assert store.active_public_id("old-md5") == "public-one"
+
+        withdrawn = {
+            legacy_id: public_id
+            for legacy_id, public_id in store.active_legacy_mappings().items()
+            if public_id in {"public-two"}
+        }
+        store.transition_with_event(second, SUCCEEDED, legacy_mappings=withdrawn)
+        assert store.active_public_id("old-md5") is None
+
+    def test_serving_generation_separates_inflight_cache_keys(self, tmp_path: Path):
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        descriptor = _descriptor()
+        store.enqueue(descriptor)
+        old_generation = store.serving_generation()
+        old_key = get_cache_key("records", None, 0, 10, "relevance", serving_generation=old_generation)
+
+        store.transition_with_event(
+            descriptor,
+            SUCCEEDED,
+            advance_serving_generation=True,
+            legacy_mappings={},
+        )
+
+        new_generation = store.serving_generation()
+        new_key = get_cache_key("records", None, 0, 10, "relevance", serving_generation=new_generation)
+        assert new_generation == old_generation + 1
+        assert new_key != old_key
+
     def test_prune_retains_live_and_one_rollback_collection(self, tmp_path: Path):
         qdrant = _FakeQdrant()
         qdrant.aliases = [SimpleNamespace(alias_name="nonprofit_knowledge_live", collection_name="new")]
@@ -385,9 +453,17 @@ class TestCollectionPublication:
         store = PublicationStore(str(tmp_path / "state.sqlite"))
         descriptor = _descriptor()
         store.enqueue(descriptor)
-        assert store.acquire_build_lock(descriptor)
+        owner = store.acquire_build_lock(descriptor)
+        assert owner
         assert not store.acquire_build_lock(_descriptor())
-        store.release_build_lock(descriptor)
+        assert store.renew_build_lock(descriptor, owner)
+        with store._connection() as connection:
+            connection.execute("UPDATE publication_build_lock SET lease_expires_at = 0")
+        replacement = store.acquire_build_lock(_descriptor())
+        assert replacement
+        store.release_build_lock(descriptor, owner)
+        assert not store.acquire_build_lock(descriptor)
+        store.release_build_lock(_descriptor(), replacement)
 
     def test_rejects_path_traversal_in_allowlisted_url(self):
         assert not _is_allowed_https_url(

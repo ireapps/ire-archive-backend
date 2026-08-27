@@ -52,6 +52,7 @@ from app.dependencies import (
     get_embedding_model,
     get_qdrant_client,
     get_sparse_model,
+    get_serving_generation,
     lifespan,
     resolve_legacy_vector_id,
 )
@@ -340,7 +341,16 @@ async def search(request: Request, response: Response, query: SearchQuery, sessi
     qdrant_client = get_qdrant_client()
 
     # Generate cache key (include search_mode to avoid mixing cached results)
-    cache_key = get_cache_key(query.query or "", filters, query.offset, query.limit, query.sort_by, query.search_mode)
+    serving_generation = get_serving_generation()
+    cache_key = get_cache_key(
+        query.query or "",
+        filters,
+        query.offset,
+        query.limit,
+        query.sort_by,
+        query.search_mode,
+        serving_generation,
+    )
 
     # Check cache
     if cache_key in search_cache:
@@ -408,6 +418,7 @@ async def search(request: Request, response: Response, query: SearchQuery, sessi
             query.offset,
             query.sort_by,
             qdrant_filter,
+            serving_generation=serving_generation,
         )
     formatted_results = format_search_results(paginated_results)
 
@@ -597,7 +608,8 @@ async def get_resource(
     logger.info("resource_request", vector_id=vector_id, user_id=session.user_id)
 
     # Generate cache key
-    cache_key = f"resource:{vector_id}"
+    serving_generation = get_serving_generation()
+    cache_key = f"resource:{serving_generation}:{vector_id}"
 
     # Check cache
     if cache_key in resource_cache:
@@ -753,7 +765,8 @@ async def get_similar_resources_endpoint(
     logger.info("similar_resources_request", vector_id=vector_id, user_id=session.user_id)
 
     # Generate cache key
-    cache_key = f"similar:{vector_id}"
+    serving_generation = get_serving_generation()
+    cache_key = f"similar:{serving_generation}:{vector_id}"
 
     # Check cache
     if cache_key in similar_cache:

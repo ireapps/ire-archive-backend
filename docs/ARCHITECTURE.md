@@ -76,6 +76,10 @@ confidently match an existing point by legacy Django `metadata.id` and title. Fo
 backend durably records a legacy-vector-ID-to-`public_id` lookup only when the alias changes. This keeps old deep links
 working without allowing a transitional ID to become a new collection's identity.
 
+Those mappings are carried to later complete snapshots only when their `public_id` still exists; an omitted or
+withdrawn resource deliberately loses its old link. A durable serving generation advances with each alias move and is
+part of every cache key, preventing in-flight pre-switch requests or another API process from serving cached old data.
+
 ## Tracking
 
 - Backend consumer and atomic indexing: [ire-archive-backend #11](https://github.com/ireapps/ire-archive-backend/issues/11)

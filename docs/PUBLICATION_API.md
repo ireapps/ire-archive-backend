@@ -58,8 +58,9 @@ and counts with a streaming parser, then builds a fresh Qdrant collection. It re
 batches at a time. Before `ijson` reads any record, the raw stream rejects a record over 20,000,000 bytes; the
 validated canonical record is also limited to 20,000,000 bytes. Each `extracted_text` is limited to 5,000,000
 characters, and at most 50,000 extracted-text characters contribute to one resource's searchable content. These
-limits bound parser materialization and must be enforced by the producer too. The public download metadata keeps its
-ID, order, URL, name, file, and size; extraction-only text is not returned to browsers.
+limits bound parser materialization and must be enforced by the producer too. The raw guard limits every item in the
+`records` array, including malformed scalar or array values, before `ijson` receives it. The public download metadata
+keeps its ID, order, URL, name, file, and size; extraction-only text is not returned to browsers.
 
 After exact point-count and representative-query validation, one Qdrant alias update moves
 `SERVING_COLLECTION_ALIAS` to the new collection. Failure never moves the alias. The prior target remains for
@@ -67,3 +68,10 @@ After exact point-count and representative-query validation, one Qdrant alias up
 body and moves only the alias - no download or re-embedding. Every new point ID is the permanent resource
 `public_id`; a durable, active legacy-vector-ID lookup resolves only confidently matched old resource links. Failed
 build collections are removed, and successful cutovers retain only the live collection and one rollback target.
+
+The durable serving generation advances with each cutover or rollback. All process-local search, resource, similar,
+and reranking cache keys include that generation, so a request that started before a switch cannot populate the new
+generation and separate API workers stop using old results immediately.
+
+Build and rollback share a durable owner lease. Active workers renew it while working; a restarted process waits for a
+live owner and may take over only an expired lease. Startup never clears another worker's lock.

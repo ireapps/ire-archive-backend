@@ -7,6 +7,7 @@ import hmac
 import json
 import sqlite3
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Iterable
@@ -27,6 +28,7 @@ from app.config import (
     BATCH_SIZE,
     COLLECTION_NAME,
     PUBLICATION_CALLBACK_RETRIES,
+    PUBLICATION_BUILD_LOCK_LEASE_SECONDS,
     PUBLICATION_CALLBACK_SECRET,
     PUBLICATION_CALLBACK_URL_PREFIXES,
     PUBLICATION_CALLBACK_URLS,
@@ -133,7 +135,9 @@ class PublicationStore:
                 CREATE TABLE IF NOT EXISTS publication_build_lock (
                     lock_name TEXT PRIMARY KEY,
                     publication_id TEXT NOT NULL,
-                    publication_version TEXT NOT NULL
+                    publication_version TEXT NOT NULL,
+                    owner_id TEXT,
+                    lease_expires_at INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS publication_legacy_mappings (
                     publication_id TEXT NOT NULL,
@@ -146,8 +150,22 @@ class PublicationStore:
                     legacy_vector_id TEXT PRIMARY KEY,
                     public_id TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS publication_serving_state (
+                    state_id INTEGER PRIMARY KEY CHECK (state_id = 1),
+                    generation INTEGER NOT NULL
+                );
+                INSERT OR IGNORE INTO publication_serving_state (state_id, generation) VALUES (1, 0);
                 """
             )
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(publication_build_lock)").fetchall()
+            }
+            if "owner_id" not in columns:
+                connection.execute("ALTER TABLE publication_build_lock ADD COLUMN owner_id TEXT")
+            if "lease_expires_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE publication_build_lock ADD COLUMN lease_expires_at INTEGER NOT NULL DEFAULT 0"
+                )
 
     def _connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -301,6 +319,7 @@ class PublicationStore:
         status: str,
         *,
         legacy_mappings: dict[str, str] | None = None,
+        advance_serving_generation: bool = False,
         **values: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Persist a state transition and its callback outbox row in one transaction."""
@@ -342,6 +361,10 @@ class PublicationStore:
                     "INSERT INTO active_legacy_vector_ids (legacy_vector_id, public_id) VALUES (?, ?)",
                     list(legacy_mappings.items()),
                 )
+            if advance_serving_generation:
+                connection.execute(
+                    "UPDATE publication_serving_state SET generation = generation + 1 WHERE state_id = 1"
+                )
             row = connection.execute(
                 "SELECT * FROM publications WHERE publication_id = ? AND publication_version = ?",
                 (descriptor.publication_id, descriptor.publication_version),
@@ -358,6 +381,16 @@ class PublicationStore:
                 "SELECT public_id FROM active_legacy_vector_ids WHERE legacy_vector_id = ?", (legacy_vector_id,)
             ).fetchone()
         return str(row["public_id"]) if row else None
+
+    def active_legacy_mappings(self) -> dict[str, str]:
+        with self._connection() as connection:
+            rows = connection.execute("SELECT legacy_vector_id, public_id FROM active_legacy_vector_ids").fetchall()
+        return {str(row["legacy_vector_id"]): str(row["public_id"]) for row in rows}
+
+    def serving_generation(self) -> int:
+        with self._connection() as connection:
+            row = connection.execute("SELECT generation FROM publication_serving_state WHERE state_id = 1").fetchone()
+        return int(row["generation"]) if row else 0
 
     def legacy_mappings(self, descriptor: PublicationDescriptor) -> dict[str, str]:
         with self._connection() as connection:
@@ -477,35 +510,69 @@ class PublicationStore:
             ).fetchall()
         return [(PublicationDescriptor(**json.loads(row["descriptor_json"])), dict(row)) for row in rows]
 
-    def acquire_build_lock(self, descriptor: PublicationDescriptor) -> bool:
-        """Acquire the cross-process lock that serializes all alias changes."""
+    def acquire_build_lock(self, descriptor: PublicationDescriptor) -> str | None:
+        """Acquire an expiring cross-process lock without disrupting a live owner."""
+        now = int(time.time())
+        owner_id = str(uuid.uuid4())
+        lease_expires_at = now + PUBLICATION_BUILD_LOCK_LEASE_SECONDS
         with self._connection() as connection:
-            try:
+            connection.execute("BEGIN IMMEDIATE")
+            lock = connection.execute(
+                "SELECT owner_id, lease_expires_at FROM publication_build_lock WHERE lock_name = 'publisher'"
+            ).fetchone()
+            if lock is None:
                 connection.execute(
                     """
-                    INSERT INTO publication_build_lock (lock_name, publication_id, publication_version)
-                    VALUES ('publisher', ?, ?)
+                    INSERT INTO publication_build_lock
+                    (lock_name, publication_id, publication_version, owner_id, lease_expires_at)
+                    VALUES ('publisher', ?, ?, ?, ?)
                     """,
-                    (descriptor.publication_id, descriptor.publication_version),
+                    (descriptor.publication_id, descriptor.publication_version, owner_id, lease_expires_at),
                 )
-            except sqlite3.IntegrityError:
-                return False
-        return True
+                return owner_id
+            if lock["lease_expires_at"] >= now:
+                return None
+            updated = connection.execute(
+                """
+                UPDATE publication_build_lock
+                SET publication_id = ?, publication_version = ?, owner_id = ?, lease_expires_at = ?
+                WHERE lock_name = 'publisher' AND lease_expires_at < ?
+                """,
+                (
+                    descriptor.publication_id,
+                    descriptor.publication_version,
+                    owner_id,
+                    lease_expires_at,
+                    now,
+                ),
+            )
+            return owner_id if updated.rowcount == 1 else None
 
-    def release_build_lock(self, descriptor: PublicationDescriptor) -> None:
+    def renew_build_lock(self, descriptor: PublicationDescriptor, owner_id: str) -> bool:
+        with self._connection() as connection:
+            updated = connection.execute(
+                """
+                UPDATE publication_build_lock SET lease_expires_at = ?
+                WHERE lock_name = 'publisher' AND publication_id = ? AND publication_version = ? AND owner_id = ?
+                """,
+                (
+                    int(time.time()) + PUBLICATION_BUILD_LOCK_LEASE_SECONDS,
+                    descriptor.publication_id,
+                    descriptor.publication_version,
+                    owner_id,
+                ),
+            )
+        return updated.rowcount == 1
+
+    def release_build_lock(self, descriptor: PublicationDescriptor, owner_id: str) -> None:
         with self._connection() as connection:
             connection.execute(
                 """
                 DELETE FROM publication_build_lock
-                WHERE lock_name = 'publisher' AND publication_id = ? AND publication_version = ?
+                WHERE lock_name = 'publisher' AND publication_id = ? AND publication_version = ? AND owner_id = ?
                 """,
-                (descriptor.publication_id, descriptor.publication_version),
+                (descriptor.publication_id, descriptor.publication_version, owner_id),
             )
-
-    def reset_build_locks(self) -> None:
-        """Clear a lock held by a process that ended before restart recovery."""
-        with self._connection() as connection:
-            connection.execute("DELETE FROM publication_build_lock")
 
 
 def _safe_message(error: Exception) -> tuple[str, str]:
@@ -603,7 +670,14 @@ class PublicationService:
 
     def _transition(self, descriptor: PublicationDescriptor, status: str, **values: Any) -> dict[str, Any]:
         legacy_mappings = values.pop("legacy_mappings", None)
-        state, event = self.store.transition_with_event(descriptor, status, legacy_mappings=legacy_mappings, **values)
+        advance_serving_generation = values.pop("advance_serving_generation", False)
+        state, event = self.store.transition_with_event(
+            descriptor,
+            status,
+            legacy_mappings=legacy_mappings,
+            advance_serving_generation=advance_serving_generation,
+            **values,
+        )
         self.deliver_event(event)
         return state
 
@@ -680,17 +754,19 @@ class PublicationService:
 
     def _upload_records(
         self, path: Path, collection_name: str, old_ids: dict[int, tuple[str, str]]
-    ) -> tuple[int, str, dict[str, str]]:
+    ) -> tuple[int, str, dict[str, str], set[str]]:
         point_count = 0
         batch: list[tuple[str, str, dict[str, Any]]] = []
         batch_bytes = 0
         validation_text = ""
         legacy_mappings: dict[str, str] = {}
+        public_ids: set[str] = set()
         for record in iter_records(path):
+            public_ids.add(record["public_id"])
             text = searchable_text(record)
             # A matching title makes the legacy Django ID a conservative cutover match.
             old_id = old_ids.get(record["id"])
-            if old_id and old_id[1] == record["title"]:
+            if old_id and old_id[0] != record["public_id"] and old_id[1] == record["title"]:
                 legacy_mappings[old_id[0]] = record["public_id"]
             item = (
                 record["public_id"],
@@ -713,7 +789,7 @@ class PublicationService:
                 batch.clear()
         if batch:
             point_count += self._upload_batch(collection_name, batch)
-        return point_count, validation_text, legacy_mappings
+        return point_count, validation_text, legacy_mappings, public_ids
 
     def _upload_batch(self, collection_name: str, batch: list[tuple[str, str, dict[str, Any]]]) -> int:
         texts = [item[1] for item in batch]
@@ -765,11 +841,34 @@ class PublicationService:
             if name.startswith(prefix) and name not in protected and self._current_alias_target() != name:
                 self.qdrant_client.delete_collection(name)
 
+    def _start_lock_heartbeat(self, descriptor: PublicationDescriptor, owner_id: str) -> threading.Event:
+        stopped = threading.Event()
+
+        def renew() -> None:
+            interval = max(1, PUBLICATION_BUILD_LOCK_LEASE_SECONDS // 3)
+            while not stopped.wait(interval):
+                if not self.store.renew_build_lock(descriptor, owner_id):
+                    logger.error("publication_build_lock_lost", publication_id=descriptor.publication_id)
+                    return
+
+        threading.Thread(target=renew, name="publication-lock-heartbeat", daemon=True).start()
+        return stopped
+
     def run(self, descriptor: PublicationDescriptor) -> None:
-        while not self.store.acquire_build_lock(descriptor):
+        owner_id: str | None = None
+        while owner_id is None:
             # Keep later work queued until the current build completes. The lock
             # is durable, so separate API workers cannot race alias changes.
+            owner_id = self.store.acquire_build_lock(descriptor)
+            if owner_id is not None:
+                break
             time.sleep(1)
+        assert owner_id is not None
+        state = self.store.get(descriptor.publication_id, descriptor.publication_version)
+        if state["status"] not in {QUEUED, BUILDING}:
+            self.store.release_build_lock(descriptor, owner_id)
+            return
+        heartbeat_stopped = self._start_lock_heartbeat(descriptor, owner_id)
         state = self._transition(descriptor, BUILDING)
         path: Path | None = None
         collection_name: str | None = None
@@ -784,6 +883,7 @@ class PublicationService:
                     descriptor,
                     SUCCEEDED,
                     legacy_mappings=self.store.legacy_mappings(descriptor),
+                    advance_serving_generation=True,
                     collection_name=collection_name,
                     record_count=info.points_count,
                     point_count=info.points_count,
@@ -807,8 +907,16 @@ class PublicationService:
                 previous_collection_name=previous,
             )
             create_hybrid_collection(self.qdrant_client, collection_name, VECTOR_SIZE, recreate=True)
-            point_count, validation_text, legacy_mappings = self._upload_records(
+            previous_legacy_mappings = self.store.active_legacy_mappings()
+            point_count, validation_text, legacy_mappings, public_ids = self._upload_records(
                 path, collection_name, self._legacy_id_map()
+            )
+            legacy_mappings.update(
+                {
+                    legacy_id: public_id
+                    for legacy_id, public_id in previous_legacy_mappings.items()
+                    if public_id in public_ids
+                }
             )
             if point_count != metadata["record_count"]:
                 raise PublicationError(
@@ -830,6 +938,8 @@ class PublicationService:
                         "SEARCH_VALIDATION_FAILED", "New collection failed representative search validation", 422
                     )
             self.store.stage_legacy_mappings(descriptor, legacy_mappings)
+            if not self.store.renew_build_lock(descriptor, owner_id):
+                raise PublicationError("BUILD_LOCK_LOST", "Publication build lease expired before alias switch", 409)
             self._switch_alias(collection_name)
             alias_switched = True
             clear_publication_caches()
@@ -837,6 +947,7 @@ class PublicationService:
                 descriptor,
                 SUCCEEDED,
                 legacy_mappings=legacy_mappings,
+                advance_serving_generation=True,
                 collection_name=collection_name,
                 previous_collection_name=previous,
                 record_count=metadata["record_count"],
@@ -861,9 +972,10 @@ class PublicationService:
             except Exception:
                 logger.exception("publication_failed_collection_cleanup_failed", collection_name=collection_name)
         finally:
+            heartbeat_stopped.set()
             if path is not None:
                 path.unlink(missing_ok=True)
-            self.store.release_build_lock(descriptor)
+            self.store.release_build_lock(descriptor, owner_id)
 
     def _download(self, descriptor: PublicationDescriptor) -> Path:
         Path(PUBLICATION_WORK_DIR).mkdir(parents=True, exist_ok=True)
@@ -888,8 +1000,14 @@ class PublicationService:
         return path
 
     def rollback(self, descriptor: PublicationDescriptor) -> dict[str, Any]:
-        while not self.store.acquire_build_lock(descriptor):
+        owner_id: str | None = None
+        while owner_id is None:
+            owner_id = self.store.acquire_build_lock(descriptor)
+            if owner_id is not None:
+                break
             time.sleep(1)
+        assert owner_id is not None
+        heartbeat_stopped = self._start_lock_heartbeat(descriptor, owner_id)
         try:
             state = self.store.get(descriptor.publication_id, descriptor.publication_version)
             if state["status"] != SUCCEEDED or not state["previous_collection_name"]:
@@ -907,16 +1025,17 @@ class PublicationService:
                 descriptor,
                 ROLLED_BACK,
                 legacy_mappings=self.store.legacy_mappings_for_collection(target),
+                advance_serving_generation=True,
                 message="Serving alias restored to the retained prior collection",
             )
             self._prune_collections(target, state["collection_name"])
             return state
         finally:
-            self.store.release_build_lock(descriptor)
+            heartbeat_stopped.set()
+            self.store.release_build_lock(descriptor, owner_id)
 
     def recover(self) -> None:
         """Resume interrupted builds and retry callbacks after a process restart."""
-        self.store.reset_build_locks()
         for event in self.store.outstanding_events():
             self.deliver_event(event)
         for descriptor, state in self.store.terminal_states_without_events():
