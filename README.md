@@ -171,7 +171,7 @@ production-domain settings.
 Deploy only the approved backend commit, after the acceptance app and its volume have been created:
 
 ```bash
-git rev-parse HEAD  # Must print 2cf588567e80b85414025b20d52d2ef515f4a143
+git rev-parse HEAD  # Must print 5572dbb6de4945ca2d8959331c91be16a0044b73
 fly deploy --config fly.acceptance.toml --app ire-archive-acceptance-search --remote-only
 ```
 
