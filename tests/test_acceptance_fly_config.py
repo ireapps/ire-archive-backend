@@ -63,7 +63,7 @@ def test_acceptance_fly_config_keeps_qdrant_private_and_persistent() -> None:
         {
             "source": "qdrant_acceptance_data",
             "destination": "/data/qdrant_storage",
-            "initial_size": "3gb",
+            "initial_size": "15gb",
         }
     ]
     assert config["vm"] == [{"cpu_kind": "performance", "cpus": 2, "memory_mb": 4096}]
