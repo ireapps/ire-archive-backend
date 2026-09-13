@@ -21,7 +21,14 @@ import httpx
 import structlog
 from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient
-from qdrant_client.models import CreateAlias, CreateAliasOperation, DeleteAlias, DeleteAliasOperation, PointStruct
+from qdrant_client.models import (
+    CollectionStatus,
+    CreateAlias,
+    CreateAliasOperation,
+    DeleteAlias,
+    DeleteAliasOperation,
+    PointStruct,
+)
 from sentence_transformers import SentenceTransformer
 
 from app.config import (
@@ -33,6 +40,8 @@ from app.config import (
     PUBLICATION_CALLBACK_URL_PREFIXES,
     PUBLICATION_CALLBACK_URLS,
     PUBLICATION_DISPATCH_SECRET,
+    PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS,
+    PUBLICATION_HEALTH_CHECK_RETRIES,
     PUBLICATION_MAX_REQUEST_BYTES,
     PUBLICATION_MAX_SNAPSHOT_BYTES,
     PUBLICATION_MAX_UPLOAD_BYTES,
@@ -997,6 +1006,45 @@ class PublicationService:
         self.qdrant_client.upsert(collection_name=collection_name, points=points, wait=True)
         return len(points)
 
+    def _await_healthy_collection(self, collection_name: str) -> None:
+        """Refuse to promote a collection whose own health status isn't green.
+
+        Qdrant reports a `green`/`yellow`/`grey`/`red` status on every collection,
+        separate from point counts and search results. A collection can have the
+        right number of points and still answer searches while stuck `red` from an
+        unresolved optimizer error (for example a disk-space problem during segment
+        merging). That status can clear on its own within a few seconds, so we poll
+        a bounded number of times before giving up and failing loudly, rather than
+        either promoting an unhealthy collection or retrying forever.
+
+        Args:
+            collection_name: Name of the newly built Qdrant collection to check.
+
+        Raises:
+            PublicationError: If the collection's status is not green after the
+                configured number of retries.
+
+        Example:
+            >>> service._await_healthy_collection("resources_2026_08_26_1")
+        """
+        status: CollectionStatus | None = None
+        for attempt in range(PUBLICATION_HEALTH_CHECK_RETRIES):
+            status = self.qdrant_client.get_collection(collection_name).status
+            if status == CollectionStatus.GREEN:
+                return
+            if attempt < PUBLICATION_HEALTH_CHECK_RETRIES - 1:
+                time.sleep(PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS)
+        logger.warning(
+            "publication_collection_unhealthy",
+            collection_name=collection_name,
+            status=str(status),
+        )
+        raise PublicationError(
+            "COLLECTION_UNHEALTHY",
+            f"New collection reported status '{status}' instead of green after upload",
+            422,
+        )
+
     def _switch_alias(self, collection_name: str) -> str | None:
         aliases = self.qdrant_client.get_aliases().aliases
         previous = next(
@@ -1173,6 +1221,10 @@ class PublicationService:
                     raise PublicationError(
                         "SEARCH_VALIDATION_FAILED", "New collection failed representative search validation", 422
                     )
+            # A collection can have the right point count and still answer searches
+            # while Qdrant itself reports it unhealthy (e.g. a stuck optimizer
+            # error). Never switch live traffic to a collection in that state.
+            self._await_healthy_collection(collection_name)
             self.store.stage_legacy_mappings(descriptor, legacy_mappings)
             self.store.stage_alias_intent(
                 descriptor,

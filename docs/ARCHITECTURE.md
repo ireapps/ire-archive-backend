@@ -69,7 +69,11 @@ These commands do not provide the atomic build, alias switch, rollback, or callb
 
 The API reads `SERVING_COLLECTION_ALIAS`, not a physical collection. On first startup it points that alias at the
 existing `COLLECTION_NAME`, so existing callers see no change. A publication writes a distinct, named collection and
-changes the alias only after the snapshot, point count, and representative query validate.
+changes the alias only after the snapshot, point count, representative query, and Qdrant's own collection health
+status (`green`) all validate. A collection can have the right point count and still answer searches while Qdrant
+itself reports it unhealthy (for example a stuck optimizer error); the backend polls the collection's status for a
+short, bounded window to let a transient blip clear on its own, then refuses to promote it if the status is still
+not `green`.
 
 Every v2 record uses its permanent `public_id` as its Qdrant point ID and API `vector_id`, including records that
 confidently match an existing point by legacy Django `metadata.id` and title. For those conservative matches, the
