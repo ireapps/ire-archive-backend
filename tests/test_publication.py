@@ -27,6 +27,7 @@ from app.publication_contract import (
     validate_snapshot,
 )
 from app.publication_service import (
+    BUILDING,
     FAILED,
     QUEUED,
     SUCCEEDED,
@@ -722,6 +723,60 @@ class TestCollectionPublication:
             ("https://storage.example/approved/",),
         )
 
+    def test_abandon_force_releases_lock_and_fails_publication(self, tmp_path: Path):
+        """A stale lock left by a hard-killed build must not block a fresh publish."""
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        descriptor = _descriptor()
+        store.enqueue(descriptor)
+        owner = store.acquire_build_lock(descriptor)
+        assert owner
+        store.update(descriptor, BUILDING)
+        service = PublicationService(store, cast(Any, None), cast(Any, None), cast(Any, None))
+
+        state = service.abandon(descriptor)
+
+        assert state["status"] == FAILED
+        assert state["error_code"] == "PUBLICATION_ABANDONED"
+        # A new build can take the lock immediately, without waiting for the
+        # abandoned build's original lease to expire.
+        assert store.acquire_build_lock(_descriptor())
+
+    def test_abandon_is_idempotent_once_publication_is_terminal(self, tmp_path: Path):
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        descriptor = _descriptor()
+        store.enqueue(descriptor)
+        store.update(descriptor, SUCCEEDED)
+        service = PublicationService(store, cast(Any, None), cast(Any, None), cast(Any, None))
+
+        state = service.abandon(descriptor)
+
+        assert state["status"] == SUCCEEDED
+        assert state["error_code"] is None
+
+    def test_abandon_does_not_disturb_a_lock_held_by_a_different_publication(self, tmp_path: Path):
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        descriptor = _descriptor()
+        store.enqueue(descriptor)
+        store.update(descriptor, BUILDING)
+        other = PublicationDescriptor(
+            publication_id="7f5db2b1-4f4f-4f5d-8b2e-3dcce9fd44d4",
+            publication_version="2026.08.27.1",
+            schema_version="2.0",
+            snapshot_url="https://storage.example/approved/other.json",
+            checksum="b" * 64,
+            callback_url="https://data.example/status",
+        )
+        owner = store.acquire_build_lock(other)
+        assert owner
+        service = PublicationService(store, cast(Any, None), cast(Any, None), cast(Any, None))
+
+        state = service.abandon(descriptor)
+
+        assert state["status"] == FAILED
+        # The lock still belongs to the unrelated in-progress publication.
+        assert not store.acquire_build_lock(descriptor)
+        store.release_build_lock(other, owner)
+
 
 class TestPublicationRoutes:
     def test_dispatch_and_authenticated_status(self, client, tmp_path: Path, monkeypatch):
@@ -820,3 +875,40 @@ class TestPublicationRoutes:
         assert response.json()["status_url"].startswith("https://")
         assert status.status_code == 200
         assert status.json()["status_url"].startswith("https://")
+
+    def test_abandon_endpoint_requires_signature_and_recovers_a_stuck_publish(
+        self, client, tmp_path: Path, monkeypatch
+    ):
+        """Staff can force-release a stuck lock without waiting for the full lease."""
+        import app.publication_service as publication_service
+
+        monkeypatch.setattr(publication_service, "PUBLICATION_DISPATCH_SECRET", "dispatch-secret")
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        descriptor = _descriptor()
+        store.enqueue(descriptor)
+        assert store.acquire_build_lock(descriptor)
+        store.update(descriptor, BUILDING)
+        service = PublicationService(store, cast(Any, None), cast(Any, None), cast(Any, None))
+        app.dependency_overrides[get_publication_service] = lambda: service
+
+        path = f"/internal/publications/{descriptor.publication_id}/{descriptor.publication_version}/abandon"
+
+        unsigned = client.post(path)
+        assert unsigned.status_code == 401
+
+        timestamp = str(int(time.time()))
+        nonce = str(uuid.uuid4())
+        signature = hmac.new(b"dispatch-secret", f"{timestamp}.{nonce}.".encode(), hashlib.sha256).hexdigest()
+        response = client.post(
+            path,
+            headers={
+                "X-IRE-Publication-Timestamp": timestamp,
+                "X-IRE-Publication-Nonce": nonce,
+                "X-IRE-Publication-Signature": f"sha256={signature}",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == FAILED
+        # A brand-new publish is no longer blocked by the abandoned build's lock.
+        assert store.acquire_build_lock(_descriptor())

@@ -112,3 +112,24 @@ async def rollback_publication(
     descriptor = PublicationDescriptor(**json.loads(state["descriptor_json"]))
     state = service.rollback(descriptor)
     return _status_response(request, state)
+
+
+@router.post("/{publication_id}/{publication_version}/abandon", response_model=PublicationStatusResponse)
+async def abandon_publication(
+    publication_id: UUID,
+    publication_version: str,
+    request: Request,
+    service: PublicationService = Depends(get_publication_service),
+) -> PublicationStatusResponse:
+    """Force-release a stuck build lock and fail a publication that stopped making progress.
+
+    Mirrors `ire-archive-data`'s own "Recover if stale" admin action: staff (or that
+    admin action itself) call this once they've confirmed a build's host process is
+    dead, so a hard-killed build does not block every later publish for up to the
+    full lock lease.
+    """
+    _authenticate_empty_request(request, service)
+    state = service.store.get(str(publication_id), publication_version)
+    descriptor = PublicationDescriptor(**json.loads(state["descriptor_json"]))
+    state = service.abandon(descriptor)
+    return _status_response(request, state)
