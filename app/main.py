@@ -31,6 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from qdrant_client.models import VectorParams
 from slowapi.errors import RateLimitExceeded
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.auth.config import get_auth_settings
 from app.auth.dependencies import require_member
@@ -45,6 +46,7 @@ from app.config import (
     RATE_LIMIT_RESOURCE,
     RATE_LIMIT_SEARCH,
     RATE_LIMIT_STATS,
+    TRUSTED_PROXY_IPS,
     VECTOR_SIZE,
     get_serving_collection_name,
 )
@@ -120,6 +122,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 logger.info("cors_middleware_added", allowed_origins=cors_origins)
+
+# Trust Fly's forwarded proto/host headers so request.url_for() (used to build the publication
+# status URL) returns the real externally-reachable https:// URL instead of the internal http://
+# scheme uvicorn sees behind Fly's TLS-terminating proxy. Added last so it's the outermost layer
+# and rewrites the request scope before any other middleware or routing sees it.
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=TRUSTED_PROXY_IPS)  # ty: ignore[invalid-argument-type]
+logger.info("proxy_headers_middleware_added", trusted_hosts=TRUSTED_PROXY_IPS)
 
 
 # Session Extension Middleware (Sliding Expiration)

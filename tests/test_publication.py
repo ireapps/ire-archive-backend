@@ -767,3 +767,56 @@ class TestPublicationRoutes:
         assert response.json()["status"] == QUEUED
         assert status.status_code == 200
         assert status.json()["status"] == QUEUED
+
+    def test_status_url_uses_forwarded_https_scheme_behind_proxy(self, client, tmp_path: Path, monkeypatch):
+        """`request.url_for()` must trust Fly's X-Forwarded-Proto, not the internal http scheme.
+
+        Regression test for https://github.com/ireapps/ire-archive-backend/issues/18: behind
+        Fly's TLS-terminating proxy, uvicorn only ever sees plain HTTP, so without proxy-header
+        trust the status URL comes back as http://, which fails Django's HTTPS-only SSRF guard
+        right after a successful dispatch.
+        """
+        import app.publication_service as publication_service
+
+        monkeypatch.setattr(publication_service, "PUBLICATION_DISPATCH_SECRET", "dispatch-secret")
+        monkeypatch.setattr(publication_service, "PUBLICATION_CALLBACK_SECRET", "callback-secret")
+        monkeypatch.setattr(
+            publication_service, "PUBLICATION_SNAPSHOT_URL_PREFIXES", ("https://storage.example/approved/",)
+        )
+        monkeypatch.setattr(publication_service, "PUBLICATION_CALLBACK_URLS", ("https://data.example/status",))
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        fake_service = SimpleNamespace(
+            store=store,
+            max_request_bytes=16384,
+            report=lambda descriptor, state: None,
+            run=lambda descriptor: None,
+        )
+        app.dependency_overrides[get_publication_service] = lambda: fake_service
+        descriptor = {**_descriptor().__dict__, "snapshot_url": "https://storage.example/approved/snapshot.json"}
+        body = json.dumps(descriptor, separators=(",", ":")).encode()
+
+        def headers(body: bytes) -> dict[str, str]:
+            timestamp = str(int(time.time()))
+            nonce = str(uuid.uuid4())
+            signature = hmac.new(
+                b"dispatch-secret", f"{timestamp}.{nonce}.".encode() + body, hashlib.sha256
+            ).hexdigest()
+            return {
+                "Content-Type": "application/json",
+                "X-IRE-Publication-Timestamp": timestamp,
+                "X-IRE-Publication-Nonce": nonce,
+                "X-IRE-Publication-Signature": f"sha256={signature}",
+                # Simulates Fly's TLS-terminating proxy forwarding the original scheme.
+                "X-Forwarded-Proto": "https",
+            }
+
+        response = client.post("/internal/publications", content=body, headers=headers(body))
+        status = client.get(
+            f"/internal/publications/{descriptor['publication_id']}/{descriptor['publication_version']}",
+            headers={key: value for key, value in headers(b"").items() if key != "Content-Type"},
+        )
+
+        assert response.status_code == 202
+        assert response.json()["status_url"].startswith("https://")
+        assert status.status_code == 200
+        assert status.json()["status_url"].startswith("https://")

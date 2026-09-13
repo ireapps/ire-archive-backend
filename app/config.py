@@ -153,6 +153,15 @@ if _additional_origins_env:
                 ALLOWED_ORIGINS.append(_o)
                 _existing.add(_o)
 
+# === PROXY CONFIGURATION ===
+
+#: Which immediate-peer IPs to trust for forwarded proto/host headers (X-Forwarded-Proto,
+#: X-Forwarded-Host, X-Forwarded-For). Behind Fly.io's TLS-terminating proxy, the app is only
+#: ever reached through that proxy, so the default trusts any peer ("*"). This is the same
+#: posture as uvicorn's own `--forwarded-allow-ips='*'` CLI flag. Override with a comma-separated
+#: list of IPs/networks to restrict trust in other deployment environments.
+TRUSTED_PROXY_IPS: str = os.getenv("TRUSTED_PROXY_IPS", "*")
+
 # === API REQUEST LIMITS ===
 
 #: Maximum query string length in characters
