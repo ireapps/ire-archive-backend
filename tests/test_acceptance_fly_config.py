@@ -66,7 +66,7 @@ def test_acceptance_fly_config_keeps_qdrant_private_and_persistent() -> None:
             "initial_size": "3gb",
         }
     ]
-    assert config["vm"] == [{"cpu_kind": "shared", "cpus": 2, "memory_mb": 4096}]
+    assert config["vm"] == [{"cpu_kind": "performance", "cpus": 2, "memory_mb": 4096}]
 
 
 def test_acceptance_deploy_guidance_requires_publication_support() -> None:
