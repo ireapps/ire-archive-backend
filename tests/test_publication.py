@@ -16,6 +16,15 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from qdrant_client.http.models import (
+    CollectionConfig,
+    CollectionInfo,
+    CollectionParams,
+    CollectionStatus,
+    HnswConfig,
+    OptimizersConfig,
+    OptimizersStatusOneOf,
+)
 
 from app.dependencies import get_publication_service
 from app.services.cache_service import get_cache_key
@@ -247,6 +256,43 @@ class TestPublicationAuthenticationAndState:
         assert error.value.status_code == 409
 
 
+def _collection_info(points_count: int, status: CollectionStatus) -> CollectionInfo:
+    """Build a real `qdrant_client` `CollectionInfo` response for tests.
+
+    Uses the actual pydantic model shape (rather than an ad hoc dict or
+    `SimpleNamespace`) so tests exercise the same attributes/types the real
+    Qdrant client returns from `get_collection()`.
+
+    Args:
+        points_count: Value to report for `CollectionInfo.points_count`.
+        status: Value to report for `CollectionInfo.status`.
+
+    Returns:
+        A minimally-populated but real `CollectionInfo` instance.
+
+    Example:
+        >>> _collection_info(5, CollectionStatus.GREEN).status
+        <CollectionStatus.GREEN: 'green'>
+    """
+    return CollectionInfo(
+        status=status,
+        optimizer_status=OptimizersStatusOneOf.OK,
+        segments_count=1,
+        config=CollectionConfig(
+            params=CollectionParams(),
+            hnsw_config=HnswConfig(m=16, ef_construct=100, full_scan_threshold=10000),
+            optimizer_config=OptimizersConfig(
+                deleted_threshold=0.2,
+                vacuum_min_vector_number=1000,
+                default_segment_number=0,
+                flush_interval_sec=5,
+            ),
+        ),
+        payload_schema={},
+        points_count=points_count,
+    )
+
+
 class _FakeQdrant:
     def __init__(self) -> None:
         self.aliases = [SimpleNamespace(alias_name="nonprofit_knowledge_live", collection_name="legacy")]
@@ -262,6 +308,10 @@ class _FakeQdrant:
         self.upload_batches = 0
         self.deleted: list[str] = []
         self.collection_names = ["legacy"]
+        # Statuses returned by successive get_collection() calls; the last
+        # entry repeats once the queue is exhausted. Defaults to always-green.
+        self.status_queue: list[CollectionStatus] = [CollectionStatus.GREEN]
+        self.get_collection_calls = 0
 
     def get_aliases(self):
         return SimpleNamespace(aliases=self.aliases)
@@ -275,7 +325,10 @@ class _FakeQdrant:
         self.upload_batches += 1
 
     def get_collection(self, _name):
-        return SimpleNamespace(points_count=self.points_count)
+        index = min(self.get_collection_calls, len(self.status_queue) - 1)
+        status = self.status_queue[index]
+        self.get_collection_calls += 1
+        return _collection_info(self.points_count, status)
 
     def query_points(self, **kwargs):
         return SimpleNamespace(points=[object()])
@@ -380,6 +433,83 @@ class TestCollectionPublication:
         assert store.get(descriptor.publication_id, descriptor.publication_version)["status"] == FAILED
         assert qdrant.aliases[0].collection_name == "legacy"
         assert qdrant.deleted
+
+    def test_stuck_unhealthy_collection_is_never_promoted(self, tmp_path: Path, monkeypatch):
+        """A collection stuck red (e.g. an unresolved optimizer error) must never go live."""
+        import app.publication_service as publication_service
+
+        monkeypatch.setattr(publication_service, "PUBLICATION_HEALTH_CHECK_RETRIES", 3)
+        monkeypatch.setattr(publication_service, "PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS", 0)
+        monkeypatch.setattr(publication_service.time, "sleep", lambda _: None)
+
+        snapshot = _snapshot([_record()])
+        path = _write_snapshot(tmp_path, snapshot)
+        descriptor = PublicationDescriptor(**{**_descriptor().__dict__, "checksum": snapshot["checksum"]})
+        qdrant = _FakeQdrant()
+        # Real CollectionInfo responses, reporting the true Qdrant shape for
+        # "ingested fine, but the collection's own health never turns green".
+        qdrant.status_queue = [CollectionStatus.RED, CollectionStatus.RED, CollectionStatus.RED]
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        store.enqueue(descriptor)
+        sparse = SimpleNamespace(as_object=lambda: {"indices": [], "values": []})
+        service = PublicationService(
+            store,
+            cast(Any, qdrant),
+            cast(Any, SimpleNamespace(encode=lambda _: SimpleNamespace(tolist=lambda: [0.1]))),
+            cast(Any, None),
+        )
+        monkeypatch.setattr(publication_service, "create_hybrid_collection", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            publication_service, "generate_embeddings_batch", lambda *args, **kwargs: ([[0.1]], [sparse])
+        )
+        monkeypatch.setattr(publication_service, "PUBLICATION_CALLBACK_SECRET", None)
+        monkeypatch.setattr(service, "_download", lambda _: path)
+
+        service.run(descriptor)
+
+        state = store.get(descriptor.publication_id, descriptor.publication_version)
+        assert state["status"] == FAILED
+        assert state["error_code"] == "COLLECTION_UNHEALTHY"
+        # The live alias must not have been switched to the unhealthy build.
+        assert qdrant.aliases[0].collection_name == "legacy"
+        assert not qdrant.alias_operations
+        assert qdrant.deleted
+
+    def test_transient_unhealthy_status_recovers_within_retry_window(self, tmp_path: Path, monkeypatch):
+        """A brief non-green blip that clears before the retry budget runs out is allowed through."""
+        import app.publication_service as publication_service
+
+        monkeypatch.setattr(publication_service, "PUBLICATION_HEALTH_CHECK_RETRIES", 3)
+        monkeypatch.setattr(publication_service, "PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS", 0)
+        monkeypatch.setattr(publication_service.time, "sleep", lambda _: None)
+
+        snapshot = _snapshot([_record()])
+        path = _write_snapshot(tmp_path, snapshot)
+        descriptor = PublicationDescriptor(**{**_descriptor().__dict__, "checksum": snapshot["checksum"]})
+        qdrant = _FakeQdrant()
+        # Yellow while segments settle, then green -- should not block promotion.
+        qdrant.status_queue = [CollectionStatus.YELLOW, CollectionStatus.GREEN]
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        store.enqueue(descriptor)
+        sparse = SimpleNamespace(as_object=lambda: {"indices": [], "values": []})
+        service = PublicationService(
+            store,
+            cast(Any, qdrant),
+            cast(Any, SimpleNamespace(encode=lambda _: SimpleNamespace(tolist=lambda: [0.1]))),
+            cast(Any, None),
+        )
+        monkeypatch.setattr(publication_service, "create_hybrid_collection", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            publication_service, "generate_embeddings_batch", lambda *args, **kwargs: ([[0.1]], [sparse])
+        )
+        monkeypatch.setattr(publication_service, "PUBLICATION_CALLBACK_SECRET", None)
+        monkeypatch.setattr(service, "_download", lambda _: path)
+
+        service.run(descriptor)
+
+        state = store.get(descriptor.publication_id, descriptor.publication_version)
+        assert state["status"] == SUCCEEDED
+        assert qdrant.aliases[0].collection_name == state["collection_name"]
 
     def test_alias_timeout_reconciles_when_qdrant_applied_the_switch(self, tmp_path: Path, monkeypatch):
         import app.publication_service as publication_service

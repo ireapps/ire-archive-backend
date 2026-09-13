@@ -210,6 +210,12 @@ PUBLICATION_SIGNATURE_MAX_AGE_SECONDS: int = int(os.getenv("PUBLICATION_SIGNATUR
 PUBLICATION_CALLBACK_RETRIES: int = int(os.getenv("PUBLICATION_CALLBACK_RETRIES", "3"))
 PUBLICATION_BUILD_LOCK_LEASE_SECONDS: int = int(os.getenv("PUBLICATION_BUILD_LOCK_LEASE_SECONDS", "7200"))
 PUBLICATION_MAX_RECORD_NESTING_DEPTH: int = int(os.getenv("PUBLICATION_MAX_RECORD_NESTING_DEPTH", "100"))
+# How long we're willing to wait for a newly built collection's own health status to
+# turn green before refusing to promote it. Transient optimizer hiccups can clear on
+# their own within seconds; a status stuck past this window is treated as a real
+# problem, not noise.
+PUBLICATION_HEALTH_CHECK_RETRIES: int = int(os.getenv("PUBLICATION_HEALTH_CHECK_RETRIES", "5"))
+PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS: float = float(os.getenv("PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS", "2"))
 
 
 def get_serving_collection_name() -> str:
@@ -302,3 +308,5 @@ assert PUBLICATION_MAX_EXTRACTED_TEXT_CHARS > 0, "PUBLICATION_MAX_EXTRACTED_TEXT
 assert PUBLICATION_BUILD_LOCK_LEASE_SECONDS >= 60, "PUBLICATION_BUILD_LOCK_LEASE_SECONDS must be at least 60"
 assert PUBLICATION_MAX_RECORD_NESTING_DEPTH > 0, "PUBLICATION_MAX_RECORD_NESTING_DEPTH must be positive"
 assert PUBLICATION_SIGNATURE_MAX_AGE_SECONDS > 0, "PUBLICATION_SIGNATURE_MAX_AGE_SECONDS must be positive"
+assert PUBLICATION_HEALTH_CHECK_RETRIES >= 1, "PUBLICATION_HEALTH_CHECK_RETRIES must be at least 1"
+assert PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS > 0, "PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS must be positive"
