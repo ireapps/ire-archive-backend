@@ -745,6 +745,25 @@ class PublicationStore:
                 (descriptor.publication_id, descriptor.publication_version, owner_id),
             )
 
+    def force_release_build_lock(self, descriptor: PublicationDescriptor) -> bool:
+        """Drop the lock immediately, without checking its owner or lease.
+
+        Only the staff-triggered abandon endpoint calls this. It exists for a build
+        whose host process was killed hard (a restart, an OOM, a crashed deploy)
+        before it could release the lock itself, so staff do not have to wait out the
+        full lease or edit the state database by hand. Returns whether this
+        publication actually held the lock.
+        """
+        with self._connection() as connection:
+            deleted = connection.execute(
+                """
+                DELETE FROM publication_build_lock
+                WHERE lock_name = 'publisher' AND publication_id = ? AND publication_version = ?
+                """,
+                (descriptor.publication_id, descriptor.publication_version),
+            )
+        return deleted.rowcount > 0
+
 
 def _safe_message(error: Exception) -> tuple[str, str]:
     if isinstance(error, SnapshotValidationError):
@@ -1287,6 +1306,27 @@ class PublicationService:
         finally:
             heartbeat_stopped.set()
             self.store.release_build_lock(descriptor, owner_id)
+
+    def abandon(self, descriptor: PublicationDescriptor) -> dict[str, Any]:
+        """Force-release a stuck build lock and mark a stalled publication as failed.
+
+        Mirrors `ire-archive-data`'s own "Recover if stale" admin action: staff call
+        this once they've confirmed a build's host process is dead (a hard kill, an
+        OOM, a crashed deploy), so a brand-new, otherwise-healthy publish is not
+        blocked for up to the full lock lease. It is a no-op if the publication has
+        already reached a terminal status.
+        """
+        state = self.store.get(descriptor.publication_id, descriptor.publication_version)
+        if state["status"] not in {QUEUED, BUILDING}:
+            return state
+        self.store.force_release_build_lock(descriptor)
+        return self._transition(
+            descriptor,
+            FAILED,
+            clear_alias_intent=True,
+            error_code="PUBLICATION_ABANDONED",
+            message="Publication abandoned via staff-triggered recovery",
+        )
 
     def _reconcile_alias_intents(self) -> None:
         """Finish an alias move recorded before a process lost its response."""

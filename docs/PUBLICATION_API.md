@@ -27,8 +27,8 @@ Poll authenticated `GET /internal/publications/{publication_id}/{publication_ver
 
 ## Request authentication
 
-Dispatch, polling, and rollback use `PUBLICATION_DISPATCH_SECRET`. Sign the exact raw UTF-8 body; never parse and
-serialize it before signing.
+Dispatch, polling, rollback, and abandon use `PUBLICATION_DISPATCH_SECRET`. Sign the exact raw UTF-8 body; never
+parse and serialize it before signing.
 
 | Header | Value |
 | --- | --- |
@@ -84,3 +84,19 @@ The ordering uses a durable, monotonic acceptance sequence assigned when each de
 callback timestamp.
 When upgrading an existing state database, stored publications are backfilled once in deterministic creation order
 (`created_at`, then publication ID and version), and subsequent descriptors receive values above that backfill.
+
+## Stale build recovery
+
+The build lock's lease (`PUBLICATION_BUILD_LOCK_LEASE_SECONDS`, default 7200s) only gets reclaimed automatically once
+it expires, or by the owning process's own heartbeat while it is alive. If a build's host process is killed hard (a
+restart, an OOM, a crashed deploy) instead of exiting cleanly, its lock is left behind and blocks every later publish
+attempt - including unrelated ones - until the full lease naturally runs out.
+
+`POST /internal/publications/{publication_id}/{publication_version}/abandon` authenticates an empty signed body, the
+same as rollback. It force-releases the build lock if this publication currently holds it and marks the publication
+`failed` with `error_code: "PUBLICATION_ABANDONED"`, delivering the normal signed `failed` callback. It is a no-op
+(returns the current state) once a publication has already reached a terminal status. This mirrors
+`ire-archive-data`'s own "Recover if stale" admin action, and is the endpoint that action's stale-build recovery calls
+to tell this backend to abandon a specific `publication_id`/`publication_version` (see `ire-archive-data` issue #162)
+so staff never need to edit the state database by hand.
+
