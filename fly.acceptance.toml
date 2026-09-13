@@ -59,10 +59,15 @@ protocol = "http"
 timeout = "10s"
 tls_skip_verify = false
 
+# Measured live during a staging dress rehearsal: 3gb was not enough headroom to retain
+# multiple full-catalog collections (each publish keeps the prior collection for rollback)
+# plus segment-optimization scratch space, and a build failed with "Not enough space
+# available for optimization" at ~90% complete. See issue #26. Bumped to 15gb; the volume
+# was also live-extended on the running app to avoid re-provisioning.
 [[mounts]]
 source = "qdrant_acceptance_data"
 destination = "/data/qdrant_storage"
-initial_size = "3gb"
+initial_size = "15gb"
 
 # Measured on the real ire-archive-acceptance-search staging app: switching from
 # shared-cpu-2x to performance-2x raised embedding throughput from ~1.87 records/sec
