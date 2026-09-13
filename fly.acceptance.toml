@@ -64,7 +64,11 @@ source = "qdrant_acceptance_data"
 destination = "/data/qdrant_storage"
 initial_size = "3gb"
 
+# Measured on the real ire-archive-acceptance-search staging app: switching from
+# shared-cpu-2x to performance-2x raised embedding throughput from ~1.87 records/sec
+# (the original drill measurement, issue #19) to ~16.8 records/sec, projecting
+# full-33,344-record indexing time from ~4-5 hours down to ~33 minutes. See issue #22.
 [[vm]]
-cpu_kind = "shared"
+cpu_kind = "performance"
 cpus = 2
 memory_mb = 4096
