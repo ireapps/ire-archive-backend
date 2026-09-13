@@ -34,6 +34,7 @@ from scripts.qdrant_ops import (
     get_batch_list,
     index_batches,
     validate_collection,
+    wait_for_indexed,
 )
 from scripts.transforms import prepare_points, transform_documents
 
@@ -153,6 +154,13 @@ def index_resources(is_production: bool = False, skip_recreate: bool = False, te
     if is_production:
         apply_production_optimizations(client)
 
+    # Points already in the collection before this run (0 for a freshly recreated
+    # collection). Used below to compute the expected count after indexing.
+    try:
+        initial_point_count = client.get_collection(COLLECTION_NAME).points_count or 0
+    except Exception:  # noqa: BLE001
+        initial_point_count = 0
+
     # Prepare documents for indexing
     console.print(f"\n[bold cyan]Preparing {len(documents):,} documents for indexing...[/bold cyan]")
 
@@ -160,10 +168,10 @@ def index_resources(is_production: bool = False, skip_recreate: bool = False, te
 
     console.print(f"[SUCCESS] Prepared {len(all_points):,} documents", style="green")
 
-    # Process documents in SEQUENTIAL batches
-    # This is critical for correctness - parallel processing caused race conditions
+    # Process documents in batches, overlapping each batch's embedding with the
+    # previous batch's (wait=False) upload instead of blocking on it.
     console.print(
-        f"\n[bold cyan]Indexing {len(all_points):,} documents (sequential batches of {BATCH_SIZE})...[/bold cyan]\n"
+        f"\n[bold cyan]Indexing {len(all_points):,} documents (batches of {BATCH_SIZE}, overlapped)...[/bold cyan]\n"
     )
 
     batches = get_batch_list(all_points, BATCH_SIZE)
@@ -181,19 +189,27 @@ def index_resources(is_production: bool = False, skip_recreate: bool = False, te
         del sparse_model
         console.print("\n[SUCCESS] Sparse model cleaned up", style="green")
 
+    # Batches upload with wait=False, so confirm Qdrant has actually caught up
+    # with a single poll here instead of blocking on every batch's durability.
+    console.print("\n[bold cyan]Verifying indexed point count...[/bold cyan]")
+    expected_point_count = initial_point_count + successful_points
+    total_vectors = wait_for_indexed(client, COLLECTION_NAME, expected_point_count)
+    if total_vectors < expected_point_count:
+        message = (
+            f"Verification timed out: Qdrant reports {total_vectors:,} points, "
+            f"expected at least {expected_point_count:,}"
+        )
+        errors.append(message)
+        console.print(f"[ERROR] {message}", style="red")
+    else:
+        console.print(f"[SUCCESS] Qdrant reports {total_vectors:,} points", style="green")
+
     # Finalize production indexing
     if is_production:
         finalize_production_indexing(client)
 
     # Get final collection stats
     total_time = time.time() - start_time
-
-    try:
-        info = client.get_collection(COLLECTION_NAME)
-        total_vectors = info.points_count or successful_points
-    except Exception as e:
-        console.print(f"[WARNING] Failed to get final stats: {e}", style="yellow")
-        total_vectors = successful_points
 
     # Get memory info for summary
     memory_gb, _ = get_memory_info()
@@ -208,7 +224,7 @@ def index_resources(is_production: bool = False, skip_recreate: bool = False, te
         total_time=total_time,
         errors=errors if errors else None,
         memory_gb=memory_gb if is_production else None,
-        parallel_mode=False,  # Always sequential now
+        parallel_mode=False,  # Single process; batches overlap embedding with upload, not concurrent uploads.
     )
 
     # Run validation tests
@@ -232,8 +248,13 @@ def index_resources(is_production: bool = False, skip_recreate: bool = False, te
         console.print("\n[WARNING] Some validation tests failed", style="yellow")
 
     # Final status
-    if successful_points == len(all_points):
+    if successful_points == len(all_points) and total_vectors >= expected_point_count:
         console.print("\n[bold green]Indexing completed successfully![/bold green]")
+    elif successful_points == len(all_points):
+        console.print(
+            f"\n[yellow]Indexing completed but point-count verification did not converge "
+            f"({total_vectors:,}/{expected_point_count:,} points)[/yellow]"
+        )
     else:
         console.print(f"\n[yellow]Indexing completed with {failed_points} failures[/yellow]")
 

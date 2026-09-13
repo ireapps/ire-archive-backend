@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import time
 from typing import Any
+from collections.abc import Callable
 
 from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient
@@ -22,7 +24,15 @@ from rich.table import Table
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm  # type: ignore[import-untyped]
 
-from app.config import COLLECTION_NAME, QDRANT_CHECK_COMPATIBILITY, QDRANT_HOST, QDRANT_PORT, QDRANT_TIMEOUT
+from app.config import (
+    COLLECTION_NAME,
+    QDRANT_CHECK_COMPATIBILITY,
+    QDRANT_HOST,
+    QDRANT_INDEX_VERIFY_POLL_SECONDS,
+    QDRANT_INDEX_VERIFY_TIMEOUT_SECONDS,
+    QDRANT_PORT,
+    QDRANT_TIMEOUT,
+)
 
 console = Console()
 
@@ -248,15 +258,18 @@ def upload_batch_with_retry(
     return 0, len(points)
 
 
-def process_batch_with_embeddings(
-    client: QdrantClient,
-    collection_name: str,
+def build_points_for_batch(
     batch: list[dict[str, Any]],
     dense_model: SentenceTransformer,
     sparse_model: SparseTextEmbedding,
     log_timing: bool = False,
-    wait: bool = True,
-) -> tuple[int, int]:
+) -> list[PointStruct]:
+    """Embed a batch of documents and turn them into hybrid Qdrant points.
+
+    This is the CPU-bound half of indexing a batch (no network calls), so it
+    is safe to run on the main thread while a previous batch's upload runs on
+    a background thread.
+    """
     texts = [doc["text"] for doc in batch]
 
     dense_embeddings, sparse_embeddings = generate_embeddings_batch(
@@ -279,7 +292,102 @@ def process_batch_with_embeddings(
         )
         points.append(point)
 
-    return upload_batch_with_retry(client, collection_name, points, max_retries=3, retry_delay=5, wait=wait)
+    return points
+
+
+class OverlappedBatchUploader:
+    """Runs an upload for each submitted batch on a single background thread.
+
+    Batches are still uploaded strictly one at a time, in submission order -
+    only one is ever in flight, and results are returned in the same order
+    they were submitted. What changes is *when* the caller waits for a
+    batch's upload to finish: instead of blocking right after submitting it,
+    the caller can do the next batch's CPU-bound embedding work first, and
+    only collect the previous batch's result when it submits the next one
+    (or calls close() for the last one). That overlaps embedding time with
+    upload time instead of spending them back-to-back, without ever having
+    more than one upload in flight, reordering points, or dropping any.
+
+    Example:
+        uploader = OverlappedBatchUploader(upload_fn)
+        for batch_idx, batch in enumerate(batches):
+            points = build_points_for_batch(batch, ...)  # overlaps prior upload
+            handle_result(uploader.submit(batch_idx, points))
+        handle_result(uploader.close())
+    """
+
+    def __init__(self, upload_fn: Callable[[list[PointStruct]], tuple[int, int]]) -> None:
+        self._upload_fn = upload_fn
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._pending: tuple[int, Future[tuple[int, int]]] | None = None
+
+    def submit(self, batch_idx: int, points: list[PointStruct]) -> tuple[int, int, int] | None:
+        """Queue a batch for upload and return the previously pending batch's result, if any."""
+        drained = self._drain_pending()
+        self._pending = (batch_idx, self._executor.submit(self._upload_fn, points))
+        return drained
+
+    def close(self) -> tuple[int, int, int] | None:
+        """Wait for the last submitted batch's result and stop the worker thread."""
+        try:
+            return self._drain_pending()
+        finally:
+            self._executor.shutdown(wait=True)
+
+    def abort(self) -> None:
+        """Stop the worker thread without waiting for or raising a pending result.
+
+        Use this when the caller is already unwinding from an unrelated error
+        and doesn't want that error replaced by a failure from the last
+        in-flight upload.
+        """
+        self._pending = None
+        self._executor.shutdown(wait=False)
+
+    def _drain_pending(self) -> tuple[int, int, int] | None:
+        if self._pending is None:
+            return None
+        batch_idx, future = self._pending
+        self._pending = None
+        success_count, fail_count = future.result()
+        return batch_idx, success_count, fail_count
+
+
+def wait_for_indexed(
+    client: QdrantClient,
+    collection_name: str,
+    expected_count: int,
+    timeout: float = QDRANT_INDEX_VERIFY_TIMEOUT_SECONDS,
+    poll_interval: float = QDRANT_INDEX_VERIFY_POLL_SECONDS,
+) -> int:
+    """Poll Qdrant until a collection reports the expected point count.
+
+    Batches are uploaded with wait=False, so Qdrant may still be applying the
+    last few of them when the final upsert call returns. This single poll
+    replaces blocking on every batch's durability confirmation - it is called
+    once, after all batches have been submitted.
+
+    Args:
+        client: Connected Qdrant client.
+        collection_name: Name of the collection to check.
+        expected_count: The point count we expect once indexing has caught up.
+        timeout: Give up after this many seconds and return whatever count
+            Qdrant last reported, even if it's short of expected_count.
+        poll_interval: Seconds to sleep between polls.
+
+    Returns:
+        The last point count Qdrant reported for the collection. Callers
+        should compare this to expected_count themselves; a short count means
+        the timeout was reached before indexing caught up.
+    """
+    deadline = time.monotonic() + timeout
+    last_count = 0
+    while True:
+        info = client.get_collection(collection_name)
+        last_count = info.points_count or 0
+        if last_count >= expected_count or time.monotonic() >= deadline:
+            return last_count
+        time.sleep(poll_interval)
 
 
 def get_batch_list(items: list[Any], batch_size: int) -> list[list[Any]]:
@@ -296,33 +404,44 @@ def index_batches(
     sparse_model: SparseTextEmbedding,
     errors: list[str],
 ) -> tuple[int, int]:
+    """Embed and upload batches, overlapping each batch's embedding with the previous batch's upload.
+
+    Uploads use wait=False; call wait_for_indexed(...) afterwards to confirm
+    the collection has caught up before relying on the result.
+    """
     successful_points = 0
     failed_points = 0
 
+    def upload_fn(points: list[PointStruct]) -> tuple[int, int]:
+        return upload_batch_with_retry(client, COLLECTION_NAME, points, max_retries=3, retry_delay=5, wait=False)
+
+    def record_result(result: tuple[int, int, int] | None) -> None:
+        nonlocal successful_points, failed_points
+        if result is None:
+            return
+        batch_idx, success_count, fail_count = result
+        successful_points += success_count
+        failed_points += fail_count
+        if fail_count > 0:
+            errors.append(f"Batch {batch_idx + 1}: {fail_count} points failed")
+
     with tqdm(total=len(batches), desc=f"Indexing {sum(len(b) for b in batches):,} documents", unit="batch") as bar:
-        for batch_idx, batch in enumerate(batches):
-            try:
-                success_count, fail_count = process_batch_with_embeddings(
-                    client=client,
-                    collection_name=COLLECTION_NAME,
-                    batch=batch,
-                    dense_model=dense_model,
-                    sparse_model=sparse_model,
-                    log_timing=False,
-                    wait=True,
-                )
-                successful_points += success_count
-                failed_points += fail_count
+        uploader = OverlappedBatchUploader(upload_fn)
+        try:
+            for batch_idx, batch in enumerate(batches):
+                try:
+                    points = build_points_for_batch(batch, dense_model, sparse_model)
+                except Exception as exc:  # noqa: BLE001
+                    failed_points += len(batch)
+                    errors.append(f"Batch {batch_idx + 1} error: {str(exc)[:100]}")
+                    console.print(f"   [ERROR] Batch {batch_idx + 1} failed: {exc}", style="red")
+                    bar.update(1)
+                    continue
 
-                if fail_count > 0:
-                    errors.append(f"Batch {batch_idx + 1}: {fail_count} points failed")
-
-            except Exception as exc:  # noqa: BLE001
-                failed_points += len(batch)
-                errors.append(f"Batch {batch_idx + 1} error: {str(exc)[:100]}")
-                console.print(f"   [ERROR] Batch {batch_idx + 1} failed: {exc}", style="red")
-
-            bar.update(1)
+                record_result(uploader.submit(batch_idx, points))
+                bar.update(1)
+        finally:
+            record_result(uploader.close())
 
     return successful_points, failed_points
 

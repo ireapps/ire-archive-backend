@@ -357,6 +357,107 @@ class TestCollectionPublication:
         assert service._upload_records(path, "new-collection", {})[0] == 2
         assert qdrant.upload_batches == 2
 
+    def test_upload_overlaps_embedding_with_previous_batch_upload(self, tmp_path: Path, monkeypatch):
+        """Batch N+1 should embed while batch N's (wait=False) upload is still in flight."""
+        import app.publication_service as publication_service
+
+        snapshot = _snapshot([_record(1), _record(2), _record(3)])
+        path = _write_snapshot(tmp_path, snapshot)
+        qdrant = _FakeQdrant()
+        service = PublicationService(
+            PublicationStore(str(tmp_path / "state.sqlite")),
+            cast(Any, qdrant),
+            cast(Any, SimpleNamespace()),
+            cast(Any, None),
+        )
+        service.max_upload_bytes = 10**9
+        monkeypatch.setattr(publication_service, "BATCH_SIZE", 1)
+
+        sparse = SimpleNamespace(as_object=lambda: {"indices": [], "values": []})
+        embed_started: list[str] = []
+
+        def fake_generate_embeddings_batch(_dense_model, _sparse_model, texts, **_kwargs):
+            embed_started.append(texts[0])
+            return [[0.1]] * len(texts), [sparse] * len(texts)
+
+        monkeypatch.setattr(publication_service, "generate_embeddings_batch", fake_generate_embeddings_batch)
+
+        upload_started = threading.Event()
+        release_upload = threading.Event()
+        real_upsert = qdrant.upsert
+
+        def blocking_upsert(**kwargs):
+            first_batch = qdrant.upload_batches == 0
+            if first_batch:
+                upload_started.set()
+                assert release_upload.wait(timeout=5), "test never released the blocked upload"
+            return real_upsert(**kwargs)
+
+        qdrant.upsert = blocking_upsert  # type: ignore[method-assign]
+
+        result: dict[str, Any] = {}
+
+        def run_upload() -> None:
+            result["value"] = service._upload_records(path, "new-collection", {})
+
+        worker = threading.Thread(target=run_upload)
+        worker.start()
+        try:
+            assert upload_started.wait(timeout=5), "first batch's upload never started"
+            # While batch 1's upload is blocked, batch 2's embedding should already
+            # have happened - proof that embedding overlaps the previous upload
+            # instead of waiting for it to complete first.
+            deadline = time.time() + 5
+            while len(embed_started) < 2 and time.time() < deadline:
+                time.sleep(0.01)
+            assert len(embed_started) >= 2, "batch 2 should embed while batch 1's upload is still in flight"
+        finally:
+            release_upload.set()
+            worker.join(timeout=5)
+        assert not worker.is_alive()
+
+        point_count, _, _, _ = result["value"]
+        assert point_count == 3
+        assert qdrant.upload_batches == 3
+        assert qdrant.points_count == 3
+
+    def test_verification_timeout_fails_build_without_touching_alias(self, tmp_path: Path, monkeypatch):
+        """If Qdrant never reports the expected point count, the alias must stay untouched."""
+        import app.publication_service as publication_service
+
+        snapshot = _snapshot([_record()])
+        path = _write_snapshot(tmp_path, snapshot)
+        descriptor = PublicationDescriptor(**{**_descriptor().__dict__, "checksum": snapshot["checksum"]})
+        qdrant = _FakeQdrant()
+        # Simulate indexing that never catches up, no matter how long we poll.
+        qdrant.get_collection = lambda _name: SimpleNamespace(points_count=0)  # type: ignore[method-assign]
+        store = PublicationStore(str(tmp_path / "state.sqlite"))
+        store.enqueue(descriptor)
+        sparse = SimpleNamespace(as_object=lambda: {"indices": [], "values": []})
+        service = PublicationService(
+            store,
+            cast(Any, qdrant),
+            cast(Any, SimpleNamespace(encode=lambda _: SimpleNamespace(tolist=lambda: [0.1]))),
+            cast(Any, None),
+        )
+        monkeypatch.setattr(publication_service, "create_hybrid_collection", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            publication_service, "generate_embeddings_batch", lambda *args, **kwargs: ([[0.1]], [sparse])
+        )
+        monkeypatch.setattr(publication_service, "PUBLICATION_CALLBACK_SECRET", None)
+        # Keep the test fast: poll quickly and give up quickly.
+        monkeypatch.setattr(publication_service, "QDRANT_INDEX_VERIFY_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr(publication_service, "QDRANT_INDEX_VERIFY_POLL_SECONDS", 0.05)
+        monkeypatch.setattr(service, "_download", lambda _: path)
+
+        service.run(descriptor)
+
+        state = store.get(descriptor.publication_id, descriptor.publication_version)
+        assert state["status"] == FAILED
+        assert state["error_code"] == "QDRANT_COUNT_MISMATCH"
+        assert qdrant.aliases[0].collection_name == "legacy"
+        assert qdrant.deleted
+
     def test_failed_build_keeps_live_alias_unchanged(self, tmp_path: Path, monkeypatch):
         import app.publication_service as publication_service
 

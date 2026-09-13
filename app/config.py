@@ -32,6 +32,15 @@ QDRANT_TIMEOUT: int = 60
 #: Skip Qdrant version compatibility check for faster startup
 QDRANT_CHECK_COMPATIBILITY: bool = False
 
+#: Max seconds to wait, after an indexing run finishes submitting batches, for Qdrant
+#: to report the expected point count. Batches are uploaded with wait=False (Qdrant
+#: acknowledges receipt and indexes asynchronously), so this single final poll takes
+#: the place of blocking on every batch's durability confirmation.
+QDRANT_INDEX_VERIFY_TIMEOUT_SECONDS: int = int(os.getenv("QDRANT_INDEX_VERIFY_TIMEOUT_SECONDS", "120"))
+
+#: Seconds between point-count polls while waiting for indexing to catch up.
+QDRANT_INDEX_VERIFY_POLL_SECONDS: float = float(os.getenv("QDRANT_INDEX_VERIFY_POLL_SECONDS", "1.0"))
+
 # === MODEL CONFIGURATION ===
 
 #: Embedding vector dimension (384 for all-MiniLM-L6-v2)
@@ -302,3 +311,5 @@ assert PUBLICATION_MAX_EXTRACTED_TEXT_CHARS > 0, "PUBLICATION_MAX_EXTRACTED_TEXT
 assert PUBLICATION_BUILD_LOCK_LEASE_SECONDS >= 60, "PUBLICATION_BUILD_LOCK_LEASE_SECONDS must be at least 60"
 assert PUBLICATION_MAX_RECORD_NESTING_DEPTH > 0, "PUBLICATION_MAX_RECORD_NESTING_DEPTH must be positive"
 assert PUBLICATION_SIGNATURE_MAX_AGE_SECONDS > 0, "PUBLICATION_SIGNATURE_MAX_AGE_SECONDS must be positive"
+assert QDRANT_INDEX_VERIFY_TIMEOUT_SECONDS > 0, "QDRANT_INDEX_VERIFY_TIMEOUT_SECONDS must be positive"
+assert QDRANT_INDEX_VERIFY_POLL_SECONDS > 0, "QDRANT_INDEX_VERIFY_POLL_SECONDS must be positive"

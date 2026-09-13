@@ -40,6 +40,8 @@ from app.config import (
     PUBLICATION_SNAPSHOT_URL_PREFIXES,
     PUBLICATION_STATE_DB,
     PUBLICATION_WORK_DIR,
+    QDRANT_INDEX_VERIFY_POLL_SECONDS,
+    QDRANT_INDEX_VERIFY_TIMEOUT_SECONDS,
     SERVING_COLLECTION_ALIAS,
     VECTOR_SIZE,
 )
@@ -52,7 +54,12 @@ from app.publication_contract import (
     validate_snapshot,
 )
 from app.services.cache_service import clear_publication_caches
-from scripts.qdrant_ops import create_hybrid_collection, generate_embeddings_batch
+from scripts.qdrant_ops import (
+    OverlappedBatchUploader,
+    create_hybrid_collection,
+    generate_embeddings_batch,
+    wait_for_indexed,
+)
 
 logger = structlog.get_logger()
 T = TypeVar("T")
@@ -928,46 +935,78 @@ class PublicationService:
     def _upload_records(
         self, path: Path, collection_name: str, old_ids: dict[int, tuple[str, str]]
     ) -> tuple[int, str, dict[str, str], set[str]]:
+        """Stream records into batches, embedding one while the previous batch uploads.
+
+        Uploads use wait=False; callers must confirm Qdrant has caught up (e.g.
+        via wait_for_indexed) before trusting the returned point count.
+        """
         point_count = 0
         batch: list[tuple[str, str, dict[str, Any]]] = []
         batch_bytes = 0
         validation_text = ""
         legacy_mappings: dict[str, str] = {}
         public_ids: set[str] = set()
-        for record in iter_records(path):
-            public_ids.add(record["public_id"])
-            text = searchable_text(record)
-            # A matching title makes the legacy Django ID a conservative cutover match.
-            old_id = old_ids.get(record["id"])
-            if old_id and old_id[0] != record["public_id"] and old_id[1] == record["title"]:
-                legacy_mappings[old_id[0]] = record["public_id"]
-            item = (
-                record["public_id"],
-                text,
-                {"title": record["title"], "doc_type": "ire_resource", "metadata": resource_metadata(record)},
-            )
-            item_bytes = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode())
-            if item_bytes > self.max_upload_bytes:
-                raise PublicationError("POINT_TOO_LARGE", "A resource exceeds the configured Qdrant upload limit", 422)
-            if batch and (len(batch) >= BATCH_SIZE or batch_bytes + item_bytes > self.max_upload_bytes):
-                point_count += self._upload_batch(collection_name, batch)
-                batch.clear()
-                batch_bytes = 0
-            batch.append(item)
-            batch_bytes += item_bytes
-            if not validation_text and text.strip():
-                validation_text = text[:1_000]
-            if len(batch) >= BATCH_SIZE:
-                point_count += self._upload_batch(collection_name, batch)
-                batch.clear()
-        if batch:
-            point_count += self._upload_batch(collection_name, batch)
+        batch_idx = 0
+
+        def upload_fn(points: list[PointStruct]) -> tuple[int, int]:
+            self.qdrant_client.upsert(collection_name=collection_name, points=points, wait=False)
+            return len(points), 0
+
+        uploader = OverlappedBatchUploader(upload_fn)
+
+        def flush(pending_batch: list[tuple[str, str, dict[str, Any]]]) -> None:
+            nonlocal point_count, batch_idx
+            points = self._build_points(pending_batch)
+            drained = uploader.submit(batch_idx, points)
+            batch_idx += 1
+            if drained is not None:
+                point_count += drained[1]
+
+        try:
+            for record in iter_records(path):
+                public_ids.add(record["public_id"])
+                text = searchable_text(record)
+                # A matching title makes the legacy Django ID a conservative cutover match.
+                old_id = old_ids.get(record["id"])
+                if old_id and old_id[0] != record["public_id"] and old_id[1] == record["title"]:
+                    legacy_mappings[old_id[0]] = record["public_id"]
+                item = (
+                    record["public_id"],
+                    text,
+                    {"title": record["title"], "doc_type": "ire_resource", "metadata": resource_metadata(record)},
+                )
+                item_bytes = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode())
+                if item_bytes > self.max_upload_bytes:
+                    raise PublicationError(
+                        "POINT_TOO_LARGE", "A resource exceeds the configured Qdrant upload limit", 422
+                    )
+                if batch and (len(batch) >= BATCH_SIZE or batch_bytes + item_bytes > self.max_upload_bytes):
+                    flush(batch)
+                    batch = []
+                    batch_bytes = 0
+                batch.append(item)
+                batch_bytes += item_bytes
+                if not validation_text and text.strip():
+                    validation_text = text[:1_000]
+                if len(batch) >= BATCH_SIZE:
+                    flush(batch)
+                    batch = []
+                    batch_bytes = 0
+            if batch:
+                flush(batch)
+        except Exception:
+            uploader.abort()
+            raise
+
+        drained = uploader.close()
+        if drained is not None:
+            point_count += drained[1]
         return point_count, validation_text, legacy_mappings, public_ids
 
-    def _upload_batch(self, collection_name: str, batch: list[tuple[str, str, dict[str, Any]]]) -> int:
+    def _build_points(self, batch: list[tuple[str, str, dict[str, Any]]]) -> list[PointStruct]:
         texts = [item[1] for item in batch]
         dense, sparse = generate_embeddings_batch(self.dense_model, self.sparse_model, texts)
-        points = [
+        return [
             PointStruct(
                 id=item[0],
                 vector={"dense": dense[index], "sparse": sparse[index].as_object()},
@@ -975,8 +1014,6 @@ class PublicationService:
             )
             for index, item in enumerate(batch)
         ]
-        self.qdrant_client.upsert(collection_name=collection_name, points=points, wait=True)
-        return len(points)
 
     def _switch_alias(self, collection_name: str) -> str | None:
         aliases = self.qdrant_client.get_aliases().aliases
@@ -1139,8 +1176,16 @@ class PublicationService:
                 raise PublicationError(
                     "POINT_COUNT_MISMATCH", "Built point count does not match the snapshot record count", 422
                 )
-            info = self.qdrant_client.get_collection(collection_name)
-            if info.points_count != metadata["record_count"]:
+            # Batches were uploaded with wait=False, so give Qdrant a chance to
+            # finish applying them before trusting its reported point count.
+            indexed_count = wait_for_indexed(
+                self.qdrant_client,
+                collection_name,
+                metadata["record_count"],
+                timeout=QDRANT_INDEX_VERIFY_TIMEOUT_SECONDS,
+                poll_interval=QDRANT_INDEX_VERIFY_POLL_SECONDS,
+            )
+            if indexed_count != metadata["record_count"]:
                 raise PublicationError(
                     "QDRANT_COUNT_MISMATCH", "Qdrant point count does not match the snapshot record count", 422
                 )
