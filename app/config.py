@@ -23,6 +23,9 @@ QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
 #: Qdrant collection name for storing vectors
 COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "nonprofit_knowledge")
 
+#: Stable alias used by the API. Publication builds replace its target, never its contents.
+SERVING_COLLECTION_ALIAS: str = os.getenv("SERVING_COLLECTION_ALIAS", f"{COLLECTION_NAME}_live")
+
 #: Timeout in seconds for Qdrant operations
 QDRANT_TIMEOUT: int = 60
 
@@ -150,6 +153,15 @@ if _additional_origins_env:
                 ALLOWED_ORIGINS.append(_o)
                 _existing.add(_o)
 
+# === PROXY CONFIGURATION ===
+
+#: Which immediate-peer IPs to trust for forwarded proto/host headers (X-Forwarded-Proto,
+#: X-Forwarded-Host, X-Forwarded-For). Behind Fly.io's TLS-terminating proxy, the app is only
+#: ever reached through that proxy, so the default trusts any peer ("*"). This is the same
+#: posture as uvicorn's own `--forwarded-allow-ips='*'` CLI flag. Override with a comma-separated
+#: list of IPs/networks to restrict trust in other deployment environments.
+TRUSTED_PROXY_IPS: str = os.getenv("TRUSTED_PROXY_IPS", "*")
+
 # === API REQUEST LIMITS ===
 
 #: Maximum query string length in characters
@@ -171,6 +183,45 @@ MAX_LIMIT: int = int(os.getenv("MAX_LIMIT", "100"))
 
 #: Unified batch size for embedding generation and upload
 BATCH_SIZE: int = 1000
+
+# === PUBLICATION CONFIGURATION ===
+
+# Publication endpoints remain disabled until both independent signing secrets and
+# narrow URL rules are configured.
+PUBLICATION_DISPATCH_SECRET: str | None = os.getenv("PUBLICATION_DISPATCH_SECRET")
+PUBLICATION_CALLBACK_SECRET: str | None = os.getenv("PUBLICATION_CALLBACK_SECRET")
+PUBLICATION_STATE_DB: str = os.getenv("PUBLICATION_STATE_DB", "/data/qdrant_storage/publication-state.sqlite3")
+PUBLICATION_WORK_DIR: str = os.getenv("PUBLICATION_WORK_DIR", "/tmp/ire-publications")
+PUBLICATION_SNAPSHOT_URL_PREFIXES: tuple[str, ...] = tuple(
+    value.strip() for value in os.getenv("PUBLICATION_SNAPSHOT_URL_PREFIXES", "").split(",") if value.strip()
+)
+PUBLICATION_CALLBACK_URLS: tuple[str, ...] = tuple(
+    value.strip() for value in os.getenv("PUBLICATION_CALLBACK_URLS", "").split(",") if value.strip()
+)
+PUBLICATION_CALLBACK_URL_PREFIXES: tuple[str, ...] = tuple(
+    value.strip() for value in os.getenv("PUBLICATION_CALLBACK_URL_PREFIXES", "").split(",") if value.strip()
+)
+PUBLICATION_MAX_REQUEST_BYTES: int = int(os.getenv("PUBLICATION_MAX_REQUEST_BYTES", "16384"))
+PUBLICATION_MAX_SNAPSHOT_BYTES: int = int(os.getenv("PUBLICATION_MAX_SNAPSHOT_BYTES", "2147483648"))
+PUBLICATION_MAX_UPLOAD_BYTES: int = int(os.getenv("PUBLICATION_MAX_UPLOAD_BYTES", "8000000"))
+PUBLICATION_MAX_RECORD_BYTES: int = int(os.getenv("PUBLICATION_MAX_RECORD_BYTES", "20000000"))
+PUBLICATION_MAX_EXTRACTED_TEXT_CHARS: int = int(os.getenv("PUBLICATION_MAX_EXTRACTED_TEXT_CHARS", "5000000"))
+PUBLICATION_SIGNATURE_MAX_AGE_SECONDS: int = int(os.getenv("PUBLICATION_SIGNATURE_MAX_AGE_SECONDS", "300"))
+PUBLICATION_CALLBACK_RETRIES: int = int(os.getenv("PUBLICATION_CALLBACK_RETRIES", "3"))
+PUBLICATION_BUILD_LOCK_LEASE_SECONDS: int = int(os.getenv("PUBLICATION_BUILD_LOCK_LEASE_SECONDS", "7200"))
+PUBLICATION_MAX_RECORD_NESTING_DEPTH: int = int(os.getenv("PUBLICATION_MAX_RECORD_NESTING_DEPTH", "100"))
+# How long we're willing to wait for a newly built collection's own health status to
+# turn green before refusing to promote it. Transient optimizer hiccups can clear on
+# their own within seconds; a status stuck past this window is treated as a real
+# problem, not noise.
+PUBLICATION_HEALTH_CHECK_RETRIES: int = int(os.getenv("PUBLICATION_HEALTH_CHECK_RETRIES", "5"))
+PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS: float = float(os.getenv("PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS", "2"))
+
+
+def get_serving_collection_name() -> str:
+    """Return the alias that API reads use instead of a mutable collection."""
+    return SERVING_COLLECTION_ALIAS
+
 
 # === STATIC CATEGORY FILTERS ===
 
@@ -249,3 +300,13 @@ assert MAX_OFFSET > 0, "MAX_OFFSET must be positive"
 assert MIN_LIMIT >= 1, "MIN_LIMIT must be at least 1"
 assert MAX_LIMIT >= MIN_LIMIT, "MAX_LIMIT must be >= MIN_LIMIT"
 assert MIN_LIMIT <= DEFAULT_LIMIT <= MAX_LIMIT, "DEFAULT_LIMIT must be between MIN_LIMIT and MAX_LIMIT"
+assert PUBLICATION_MAX_REQUEST_BYTES > 0, "PUBLICATION_MAX_REQUEST_BYTES must be positive"
+assert PUBLICATION_MAX_SNAPSHOT_BYTES > 0, "PUBLICATION_MAX_SNAPSHOT_BYTES must be positive"
+assert PUBLICATION_MAX_UPLOAD_BYTES > 0, "PUBLICATION_MAX_UPLOAD_BYTES must be positive"
+assert PUBLICATION_MAX_RECORD_BYTES > 0, "PUBLICATION_MAX_RECORD_BYTES must be positive"
+assert PUBLICATION_MAX_EXTRACTED_TEXT_CHARS > 0, "PUBLICATION_MAX_EXTRACTED_TEXT_CHARS must be positive"
+assert PUBLICATION_BUILD_LOCK_LEASE_SECONDS >= 60, "PUBLICATION_BUILD_LOCK_LEASE_SECONDS must be at least 60"
+assert PUBLICATION_MAX_RECORD_NESTING_DEPTH > 0, "PUBLICATION_MAX_RECORD_NESTING_DEPTH must be positive"
+assert PUBLICATION_SIGNATURE_MAX_AGE_SECONDS > 0, "PUBLICATION_SIGNATURE_MAX_AGE_SECONDS must be positive"
+assert PUBLICATION_HEALTH_CHECK_RETRIES >= 1, "PUBLICATION_HEALTH_CHECK_RETRIES must be at least 1"
+assert PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS > 0, "PUBLICATION_HEALTH_CHECK_INTERVAL_SECONDS must be positive"
