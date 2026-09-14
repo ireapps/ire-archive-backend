@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
-      production: ${{ steps.filter.outputs.production }}
+      deploy: ${{ steps.filter.outputs.deploy }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -49,7 +49,7 @@ jobs:
               - 'docker/entrypoint.sh'
               - 'docker/config/qdrant.yaml'
               - '.github/workflows/ci-cd.yml'
-            production:
+            deploy:
               - 'app/**'
               - 'scripts/**'
               - 'pyproject.toml'
@@ -57,6 +57,7 @@ jobs:
               - 'docker/Dockerfile'
               - 'docker/Dockerfile.base'
               - 'fly.toml'
+              - 'fly.acceptance.toml'
               - 'docker/supervisord.conf'
               - 'docker/entrypoint.sh'
               - 'docker/config/qdrant.yaml'
@@ -150,24 +151,26 @@ jobs:
         run: uv run mypy .
 
   # --------------------------------------------------------------------------
-  # NOTE: This job deploys to IRE's production Fly.io instance.
+  # NOTE: This job auto-deploys to IRE's staging Fly.io instance only. It never
+  # touches production. Promoting a specific staged commit to production is a
+  # deliberate, separate action — see .github/workflows/promote-production.yml.
   # Fork maintainers: update the app name below and the verification URL,
   # then add FLY_API_TOKEN to your repo's Settings → Secrets → Actions.
   # --------------------------------------------------------------------------
-  deploy-backend:
-    name: Deploy backend to Fly.io
+  deploy-staging:
+    name: Deploy backend to staging (Fly.io)
     runs-on: ubuntu-latest
     needs: [changes, backend-tests, lint-python, type-check]
     if: |
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
-      needs.changes.outputs.production == 'true' &&
+      needs.changes.outputs.deploy == 'true' &&
       !contains(github.event.head_commit.message, '[skip deploy]')
     environment:
-      name: production-backend
-      url: https://api.archive.ire.org
+      name: staging-backend
+      url: https://ire-archive-acceptance-search.fly.dev
     concurrency:
-      group: prod-backend-ops
+      group: staging-backend-ops
       cancel-in-progress: false
 
     steps:
@@ -177,8 +180,8 @@ jobs:
       - name: Setup Fly.io CLI
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Deploy to Fly.io
-        run: flyctl deploy --remote-only --app ire-semantic-search
+      - name: Deploy to Fly.io staging
+        run: flyctl deploy --remote-only --config fly.acceptance.toml --app ire-archive-acceptance-search
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
@@ -186,5 +189,6 @@ jobs:
         run: |
           echo "Waiting 30s for deployment to stabilize..."
           sleep 30
-          curl -f https://api.archive.ire.org/ || exit 1
-          echo "✅ Backend deployment verified!"
+          curl -f https://ire-archive-acceptance-search.fly.dev/healthz || exit 1
+          echo "✅ Staging deployment verified!"
+          echo "To promote this exact commit to production, run the 'Promote staged backend to production' workflow with this run's ID: ${{ github.run_id }}"

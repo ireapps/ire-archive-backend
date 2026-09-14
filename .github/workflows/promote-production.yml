@@ -1,0 +1,92 @@
+name: Promote staged backend to production
+
+# --------------------------------------------------------------------------
+# NOTE: This is the ONLY path that deploys to IRE's production Fly.io
+# instance. It never runs automatically — a human must explicitly trigger it
+# with the run ID of a successful staging deploy (from ci-cd.yml's
+# "Deploy backend to staging (Fly.io)" job). This replaces the old
+# manual-prod-deploy.yml: there is now exactly one, deliberate way to reach
+# production.
+#
+# Fork maintainers: update the app names/URLs below, then add FLY_API_TOKEN
+# to your repo's Settings → Secrets → Actions.
+# --------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      staging_run_id:
+        description: Run ID of the successful "Continuous Integration and Deployment" run that deployed to staging
+        required: true
+        type: string
+
+concurrency:
+  group: prod-backend-ops
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  promote-production:
+    name: Promote staged commit to production
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production-backend
+      url: https://api.archive.ire.org
+
+    steps:
+      - name: Resolve and verify the staged commit
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_RUN_ID: ${{ inputs.staging_run_id }}
+        run: |
+          set -euo pipefail
+
+          run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${STAGING_RUN_ID}")"
+          test "$(jq -r '.path' <<< "$run")" = ".github/workflows/ci-cd.yml"
+          test "$(jq -r '.event' <<< "$run")" = "push"
+          test "$(jq -r '.head_branch' <<< "$run")" = "main"
+          test "$(jq -r '.conclusion' <<< "$run")" = "success"
+
+          jobs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${STAGING_RUN_ID}/jobs")"
+          staging_job="$(jq -r '.jobs[] | select(.name == "Deploy backend to staging (Fly.io)")' <<< "$jobs")"
+          test -n "$staging_job"
+          test "$(jq -r '.conclusion' <<< "$staging_job")" = "success"
+
+          source_sha="$(jq -r '.head_sha' <<< "$run")"
+          printf '%s' "$source_sha" | grep -Eq '^[0-9a-f]{40}$'
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the exact staged commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Confirm the staged commit is still on main
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch origin main
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+
+      - name: Setup Fly.io CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy the staged commit to production
+        run: flyctl deploy --remote-only --app ire-semantic-search
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Verify deployment
+        run: |
+          echo "Waiting 30s for deployment to stabilize..."
+          sleep 30
+          curl -f https://api.archive.ire.org/ || exit 1
+          echo "✅ Production deployment verified!"

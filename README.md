@@ -143,33 +143,45 @@ The API contract the frontend expects is documented in [docs/API_CONTRACT.md](do
 
 ## Deployment
 
-### Fly.io (Automated)
+### Fly.io (Automated staging, deliberate production promotion)
 
-Pushes to main automatically deploy code via GitHub Actions after tests pass. This does not publish data.
+Pushes to `main` that touch app/runtime code automatically deploy to **staging** (`ire-archive-acceptance-search`,
+using `fly.acceptance.toml`) via GitHub Actions, after tests pass. This never touches production, and it does not
+publish data.
+
+Shipping a specific, already-staged commit to **production** (`ire-semantic-search`) is a separate, deliberate
+step: a person runs the "Promote staged backend to production" GitHub Actions workflow by hand
+(`workflow_dispatch`), passing the run ID of the staging deploy to promote. That workflow re-verifies the staging
+run actually succeeded and deployed that exact commit before redeploying it to production, then checks
+post-deploy health. Add `[skip deploy]` to a commit message to skip even the automatic staging deploy.
 
 ### Fly.io (Manual)
 
 ```bash
-make prod-push            # Deploy code
+make prod-push            # Deploy code directly to production (bypasses staging/promotion)
 make prod-index           # Run the legacy Qdrant indexer
 make prod-status          # Check status
 make prod-logs            # View logs
 make prod-rebuild         # Legacy code deploy + destructive reindex
 ```
 
-These are legacy operator commands, not the target publication workflow. `--no-clear-db` only skips collection
-recreation; it is not incremental synchronization and does not remove omitted or withdrawn records. Approved
-snapshot publication uses [docs/PUBLICATION_API.md](docs/PUBLICATION_API.md), separately from code deployment.
+`make prod-push` and `make prod-rebuild` deploy straight to production and are meant as an emergency escape
+hatch, not the normal path — prefer the staging deploy + promotion workflow above so every production deploy is
+a deliberate decision made from a build that already ran on staging. These are legacy operator commands, not the
+target publication workflow. `--no-clear-db` only skips collection recreation; it is not incremental
+synchronization and does not remove omitted or withdrawn records. Approved snapshot publication uses
+[docs/PUBLICATION_API.md](docs/PUBLICATION_API.md), separately from code deployment.
 
 ### Fly.io (Staff acceptance)
 
-`fly.acceptance.toml` is a separate, manual configuration for the private staff-acceptance backend. It names only
-`ire-archive-acceptance-search` in `ord`, runs its own loopback-only Qdrant service, and mounts the separate
-`qdrant_acceptance_data` volume. It deliberately contains no publication, legacy data URL, Redis, MemberSuite, or
-production-domain settings.
+`fly.acceptance.toml` is the configuration for the private staff-acceptance backend, and is also what the
+automated staging deploy above uses. It names only `ire-archive-acceptance-search` in `ord`, runs its own
+loopback-only Qdrant service, and mounts the separate `qdrant_acceptance_data` volume. It deliberately contains no
+publication, legacy data URL, Redis, MemberSuite, or production-domain settings.
 
-Deploy only a reviewed merged-main commit that contains this configuration and the protected-publication release,
-after the acceptance app and its volume have been created:
+For an out-of-band manual deploy (e.g. troubleshooting outside of CI), deploy only a reviewed merged-main commit
+that contains this configuration and the protected-publication release, after the acceptance app and its volume
+have been created:
 
 ```bash
 git merge-base --is-ancestor 2cf588567e80b85414025b20d52d2ef515f4a143 HEAD
@@ -177,7 +189,7 @@ git rev-parse HEAD  # Record the resulting exact reviewed main revision before d
 fly deploy --config fly.acceptance.toml --app ire-archive-acceptance-search --remote-only
 ```
 
-Do not use `make prod-*`, the production deployment workflows, or the production reindex workflow for staff
+Do not use `make prod-*`, the production promotion workflow, or the production reindex workflow for staff
 acceptance. A code deploy does not publish data; publication remains disabled until its separate secrets and HTTPS
 allowlists are deliberately configured.
 

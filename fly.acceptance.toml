@@ -1,6 +1,9 @@
-# Staff acceptance only. Deploy only a reviewed commit that contains this file
-# and has 2cf588567e80b85414025b20d52d2ef515f4a143 as an ancestor. It is
-# intentionally separate from the production fly.toml and GitHub Actions workflows.
+# Staff acceptance / staging only. This is the config the "Deploy backend to
+# staging (Fly.io)" job in .github/workflows/ci-cd.yml deploys automatically
+# on every merge to main. Every commit on main already has 2cf588567e80b85414025b20d52d2ef515f4a143 as an ancestor.
+# It is intentionally separate from the production fly.toml, which is only
+# ever deployed via the deliberate, manually-triggered promote-production.yml
+# workflow (or the equivalent `make prod-*` escape hatch).
 app = "ire-archive-acceptance-search"
 primary_region = "ord"
 kill_signal = "SIGINT"
