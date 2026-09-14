@@ -160,8 +160,12 @@ Frontend tests live in the frontend repo.
 
 ## Deployment
 
-Automated code deploys to Fly.io on push to main via `.github/workflows/ci-cd.yml`. Manual commands live in
-`scripts/prod_tasks.py` (`make prod-...`). Production API: https://api.archive.ire.org.
+Pushes to main auto-deploy to **staging** (`ire-archive-acceptance-search`) via `.github/workflows/ci-cd.yml`'s
+`deploy-staging` job. This never touches production. Promoting a specific staged commit to **production**
+(`ire-semantic-search`) is a separate, deliberate action: run the `workflow_dispatch`-triggered
+`.github/workflows/promote-production.yml`, passing the run ID of the staging deploy to promote. Manual commands
+live in `scripts/prod_tasks.py` (`make prod-...`) as an emergency escape hatch that bypasses staging. Production
+API: https://api.archive.ire.org.
 
 Do not describe a code deploy as a data publication. The existing production indexing commands are legacy
 operator tools and do not yet implement the atomic publication design in backend issue #11.
