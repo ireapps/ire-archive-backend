@@ -125,6 +125,9 @@ docs/BACKEND_OPEN_SOURCE_PLAN.md
 # ruff
 .ruff_cache/
 
+# AI agent planning artifacts
+.goals/
+
 # pip and uv
 ./build/
 

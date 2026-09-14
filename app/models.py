@@ -1,8 +1,9 @@
 """Pydantic models for API requests and responses."""
 
 from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.config import DEFAULT_LIMIT, MAX_LIMIT, MAX_OFFSET, MAX_QUERY_LENGTH, MIN_LIMIT
 from app.validators import SortOrder, sanitize_query, validate_categories
@@ -86,3 +87,40 @@ class ErrorResponse(BaseModel):
     message: str = Field(description="Human-readable error message")
     status_code: int = Field(description="HTTP status code")
     request_id: str | None = Field(default=None, description="Request ID for tracking/support")
+
+
+class PublicationDescriptorRequest(BaseModel):
+    """The authenticated data-side request to build one approved snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    publication_id: UUID
+    publication_version: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
+    schema_version: Literal["2.0"]
+    snapshot_url: str = Field(min_length=1, max_length=4096)
+    checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
+    callback_url: str = Field(min_length=1, max_length=4096)
+
+    @field_validator("publication_version")
+    @classmethod
+    def normalize_publication_version(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("publication_version must not be blank")
+        return value
+
+
+class PublicationStatusResponse(BaseModel):
+    """A safe view of the durable asynchronous publication state."""
+
+    publication_id: UUID
+    publication_version: str
+    status: Literal["queued", "building", "succeeded", "failed", "rolled_back"]
+    status_url: str
+    idempotent: bool = False
+    collection_name: str | None = None
+    previous_collection_name: str | None = None
+    record_count: int | None = None
+    point_count: int | None = None
+    error_code: str | None = None
+    message: str | None = None

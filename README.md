@@ -21,6 +21,24 @@ A FastAPI backend for searching IRE's archive of journalism resources — tipshe
 
 ---
 
+## Architecture
+
+The archive spans three repositories:
+
+- [`ireapps/ire-archive-data`](https://github.com/ireapps/ire-archive-data) is the Django/Postgres editorial source
+  of truth.
+- This repository serves the search and MemberSuite authentication API.
+- [`ireapps/ire-archive-frontend`](https://github.com/ireapps/ire-archive-frontend) consumes that API.
+
+Qdrant is a disposable serving index, not a source of truth or backup. The agreed publication design uses
+validated, immutable, versioned snapshots of approved Django records and replaces the serving collection
+atomically. It is tracked in [issue #11](https://github.com/ireapps/ire-archive-backend/issues/11) and documented
+in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+Code deployment and data publication are separate operations.
+
+---
+
 ## Prerequisites
 
 - Python 3.12
@@ -46,7 +64,8 @@ The API starts at http://localhost:8000. Qdrant dashboard at http://localhost:63
 
 ## Data Files
 
-The source JSON data (`data/ire-archive-data.json`) contains the IRE resource catalog and is **not included** in this repository. You need it before you can index.
+The local source JSON data (`data/ire-archive-data.json`) contains an IRE resource catalog and is **not included**
+in this repository. It is development input, not the permanent editorial record.
 
 ### Local Development
 
@@ -56,9 +75,14 @@ Place the file manually:
 data/ire-archive-data.json
 ```
 
-Contact the IRE team to obtain it, or set `DATA_URL` (see below) and the indexer will download it automatically.
+Contact the IRE team to obtain a validated development snapshot. The legacy indexer can also download a trusted
+snapshot through `DATA_URL` as described below.
 
-### Production / Automated Indexing
+### Legacy production indexing
+
+The current production indexer can read `DATA_URL`, but it predates the publication architecture and must only be
+given a trusted, validated snapshot by an operator. It is not the approved publication endpoint and must not be
+configured to fetch arbitrary URLs.
 
 ```bash
 # Required: URL to the data file
@@ -97,6 +121,7 @@ uv run pytest tests/ -k test_search -v     # Specific tests
 ```bash
 uv run ruff check .              # Lint
 uv run ruff format --check .     # Format check
+uv run ty check app scripts tests # Static type check
 ```
 
 ---
@@ -118,19 +143,55 @@ The API contract the frontend expects is documented in [docs/API_CONTRACT.md](do
 
 ## Deployment
 
-### Fly.io (Automated)
+### Fly.io (Automated staging, deliberate production promotion)
 
-Pushes to main automatically deploy via GitHub Actions after tests pass. Database indexing remains a manual step.
+Pushes to `main` that touch app/runtime code automatically deploy to **staging** (`ire-archive-acceptance-search`,
+using `fly.acceptance.toml`) via GitHub Actions, after tests pass. This never touches production, and it does not
+publish data.
+
+Shipping a specific, already-staged commit to **production** (`ire-semantic-search`) is a separate, deliberate
+step: a person runs the "Promote staged backend to production" GitHub Actions workflow by hand
+(`workflow_dispatch`), passing the run ID of the staging deploy to promote. That workflow re-verifies the staging
+run actually succeeded and deployed that exact commit before redeploying it to production, then checks
+post-deploy health. Add `[skip deploy]` to a commit message to skip even the automatic staging deploy.
 
 ### Fly.io (Manual)
 
 ```bash
-make prod-push            # Deploy code
-make prod-index           # Index database (scales VM to 16 GB)
+make prod-push            # Deploy code directly to production (bypasses staging/promotion)
+make prod-index           # Run the legacy Qdrant indexer
 make prod-status          # Check status
 make prod-logs            # View logs
-make prod-rebuild         # Full rebuild: push + clear + index + verify
+make prod-rebuild         # Legacy code deploy + destructive reindex
 ```
+
+`make prod-push` and `make prod-rebuild` deploy straight to production and are meant as an emergency escape
+hatch, not the normal path — prefer the staging deploy + promotion workflow above so every production deploy is
+a deliberate decision made from a build that already ran on staging. These are legacy operator commands, not the
+target publication workflow. `--no-clear-db` only skips collection recreation; it is not incremental
+synchronization and does not remove omitted or withdrawn records. Approved snapshot publication uses
+[docs/PUBLICATION_API.md](docs/PUBLICATION_API.md), separately from code deployment.
+
+### Fly.io (Staff acceptance)
+
+`fly.acceptance.toml` is the configuration for the private staff-acceptance backend, and is also what the
+automated staging deploy above uses. It names only `ire-archive-acceptance-search` in `ord`, runs its own
+loopback-only Qdrant service, and mounts the separate `qdrant_acceptance_data` volume. It deliberately contains no
+publication, legacy data URL, Redis, MemberSuite, or production-domain settings.
+
+For an out-of-band manual deploy (e.g. troubleshooting outside of CI), deploy only a reviewed merged-main commit
+that contains this configuration and the protected-publication release, after the acceptance app and its volume
+have been created:
+
+```bash
+git merge-base --is-ancestor 2cf588567e80b85414025b20d52d2ef515f4a143 HEAD
+git rev-parse HEAD  # Record the resulting exact reviewed main revision before deployment.
+fly deploy --config fly.acceptance.toml --app ire-archive-acceptance-search --remote-only
+```
+
+Do not use `make prod-*`, the production promotion workflow, or the production reindex workflow for staff
+acceptance. A code deploy does not publish data; publication remains disabled until its separate secrets and HTTPS
+allowlists are deliberately configured.
 
 ### Environment Variables
 
@@ -143,7 +204,7 @@ See [.env.example](.env.example) for all configuration options. Key variables:
 | SESSION_SECRET                   | Random 32+ char hex string    |
 | MS_TENANT_ID / MS_ASSOCIATION_ID | MemberSuite SSO credentials   |
 | FRONTEND_URL                     | Frontend origin for redirects |
-| DATA_URL / DATA_URL_TOKEN        | Data file URL + auth token    |
+| DATA_URL / DATA_URL_TOKEN        | Legacy trusted snapshot input |
 | ADDITIONAL_ALLOWED_ORIGINS       | Extra CORS origins            |
 
 ### Updating ML Dependencies

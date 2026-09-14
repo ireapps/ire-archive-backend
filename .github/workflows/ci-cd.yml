@@ -23,9 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
+      deploy: ${{ steps.filter.outputs.deploy }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Check for file changes
         uses: dorny/paths-filter@v4
@@ -36,12 +37,27 @@ jobs:
               - 'app/**'
               - 'scripts/**'
               - 'tests/**'
+              - 'README.md'
+              - 'fly.acceptance.toml'
               - 'pyproject.toml'
               - 'uv.lock'
               - 'docker/Dockerfile'
               - 'docker/Dockerfile.base'
               - 'fly.toml'
               - 'docker/docker-compose.yml'
+              - 'docker/supervisord.conf'
+              - 'docker/entrypoint.sh'
+              - 'docker/config/qdrant.yaml'
+              - '.github/workflows/ci-cd.yml'
+            deploy:
+              - 'app/**'
+              - 'scripts/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'docker/Dockerfile'
+              - 'docker/Dockerfile.base'
+              - 'fly.toml'
+              - 'fly.acceptance.toml'
               - 'docker/supervisord.conf'
               - 'docker/entrypoint.sh'
               - 'docker/config/qdrant.yaml'
@@ -54,10 +70,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -75,7 +91,7 @@ jobs:
         run: uv run pytest tests/ -v --tb=short --cov=app --cov=scripts --cov-report=xml --cov-report=html
 
       - name: Upload coverage reports
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: ./coverage.xml
           flags: backend
@@ -90,7 +106,7 @@ jobs:
     steps:
       - id: checkout
         name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - id: check-ruff
         name: Check with Ruff
@@ -111,10 +127,10 @@ jobs:
     if: needs.changes.outputs.backend == 'true'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -126,41 +142,46 @@ jobs:
           cache-dependency-glob: "**/pyproject.toml"
 
       - name: Install dependencies
-        run: uv sync --extra test --extra mypy
+        run: uv sync --extra test --extra mypy --extra dev
+
+      - name: Run ty
+        run: uv run ty check app/publication_contract.py app/publication_routes.py app/publication_service.py
 
       - name: Run mypy
         run: uv run mypy .
 
   # --------------------------------------------------------------------------
-  # NOTE: This job deploys to IRE's production Fly.io instance.
+  # NOTE: This job auto-deploys to IRE's staging Fly.io instance only. It never
+  # touches production. Promoting a specific staged commit to production is a
+  # deliberate, separate action — see .github/workflows/promote-production.yml.
   # Fork maintainers: update the app name below and the verification URL,
   # then add FLY_API_TOKEN to your repo's Settings → Secrets → Actions.
   # --------------------------------------------------------------------------
-  deploy-backend:
-    name: Deploy backend to Fly.io
+  deploy-staging:
+    name: Deploy backend to staging (Fly.io)
     runs-on: ubuntu-latest
     needs: [changes, backend-tests, lint-python, type-check]
     if: |
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
-      needs.changes.outputs.backend == 'true' &&
+      needs.changes.outputs.deploy == 'true' &&
       !contains(github.event.head_commit.message, '[skip deploy]')
     environment:
-      name: production-backend
-      url: https://api.archive.ire.org
+      name: staging-backend
+      url: https://ire-archive-acceptance-search.fly.dev
     concurrency:
-      group: prod-backend-ops
+      group: staging-backend-ops
       cancel-in-progress: false
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Fly.io CLI
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Deploy to Fly.io
-        run: flyctl deploy --remote-only --app ire-semantic-search
+      - name: Deploy to Fly.io staging
+        run: flyctl deploy --remote-only --config fly.acceptance.toml --app ire-archive-acceptance-search
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
@@ -168,5 +189,6 @@ jobs:
         run: |
           echo "Waiting 30s for deployment to stabilize..."
           sleep 30
-          curl -f https://api.archive.ire.org/ || exit 1
-          echo "✅ Backend deployment verified!"
+          curl -f https://ire-archive-acceptance-search.fly.dev/healthz || exit 1
+          echo "✅ Staging deployment verified!"
+          echo "To promote this exact commit to production, run the 'Promote staged backend to production' workflow with this run's ID: ${{ github.run_id }}"
