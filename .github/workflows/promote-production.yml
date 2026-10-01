@@ -62,7 +62,7 @@ jobs:
           echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Checkout the exact staged commit
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.source.outputs.sha }}
           fetch-depth: 0
